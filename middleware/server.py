@@ -1,52 +1,113 @@
 import asyncio
+from pyasn1.codec.ber import decoder, encoder
+from ldap3.protocol.rfc4511 import LDAPMessage, BindResponse, AddResponse, ResultCode
 
 from middleware.request_parser import LDAPRequestParser
+from middleware.dns_discovery import DNSAutoDiscovery
+from middleware.coordinator import MiddlewareCoordinator
 
 
 class LDAPMiddleware:
-    def __init__(self, host, port, ldap_handler):
-        self.host = host
-        self.port = port
+    def __init__(self, dns_name, ldap_handler):
+        self.coordinator = MiddlewareCoordinator(dns_name)
         self.ldap_handler = ldap_handler
+        self.sessions = {}  # Almacenar el estado por dirección IP
+
+    def discover_replicas(self):
+        discovery = DNSAutoDiscovery(self.dns_name)
+        replicas = discovery.get_replica_ips()  # O get_replica_hosts() para SRV
+        print(f"Réplicas descubiertas: {replicas}")
+        return replicas
 
     async def handle_client(self, reader, writer):
+        client_address = writer.get_extra_info("peername")
+        print(f"Conexión desde: {client_address}")
+
         try:
-            # Leer datos del cliente
+            # Leer datos en binario
             data = await reader.read(1024)
-            command = data.decode()
+            if not data:
+                print("Conexión cerrada por el cliente")
+                return
 
-            # Parsear el comando LDAP
-            request = LDAPRequestParser.parse_command(command)
+            print(f"Solicitud binaria recibida: {data}")
 
-            # Procesar el request (esto incluye validación ahora)
-            result = self.ldap_handler.handle_request(request)
+            # Decodificar el mensaje LDAP
+            ldap_message, _ = decoder.decode(data, asn1Spec=LDAPMessage())
+            print(f"Mensaje LDAP decodificado: {ldap_message.prettyPrint()}")
 
-            # Enviar respuesta
-            response = {"status": "success", "result": result}
-            writer.write(str(response).encode())
-            await writer.drain()
+            # Identificar la operación
+            protocol_op = ldap_message["protocolOp"]
+            print(f"Operación LDAP: {protocol_op.getName()}")
 
-        except ValueError as e:
-            # Manejar errores de validación
-            error_response = {"status": "error", "message": str(e)}
-            writer.write(str(error_response).encode())
-            await writer.drain()
+            if protocol_op.getName() == "bindRequest":
+                # Procesar Bind Request
+                bind_request = protocol_op["bindRequest"]
+                dn = str(bind_request["name"])
+                password = str(bind_request["authentication"]["simple"])
+
+                print(f"Bind Request recibido: dn={dn}, password={password}")
+                if self.ldap_handler.validate_credentials(dn, password):
+                    bind_response = BindResponse()
+                    bind_response["resultCode"] = 0  # success
+                    bind_response["matchedDN"] = dn
+                    bind_response["diagnosticMessage"] = "Bind successful"
+                else:
+                    bind_response = BindResponse()
+                    bind_response["resultCode"] = 49  # invalidCredentials
+                    bind_response["matchedDN"] = ""
+                    bind_response["diagnosticMessage"] = "Invalid credentials"
+
+                # Enviar respuesta al cliente
+                ldap_response = LDAPMessage()
+                ldap_response["messageID"] = ldap_message["messageID"]
+                ldap_response["protocolOp"]["bindResponse"] = bind_response
+                writer.write(encoder.encode(ldap_response))
+                await writer.drain()
+                print("Respuesta de Bind enviada")
+
+            elif protocol_op.getName() == "addRequest":
+                # Procesar Add Request
+                add_request = protocol_op["addRequest"]
+                dn = str(add_request["entry"])
+                attributes = {
+                    str(attr["type"]): [str(value) for value in attr["vals"]]
+                    for attr in add_request["attributes"]
+                }
+
+                print(f"Add Request recibido: dn={dn}, attributes={attributes}")
+                if self.ldap_handler.add_entry(dn, attributes):
+                    add_response = AddResponse()
+                    add_response["resultCode"] = 0  # success
+                    add_response["matchedDN"] = dn
+                    add_response["diagnosticMessage"] = "Add successful"
+                else:
+                    add_response = AddResponse()
+                    add_response["resultCode"] = 80  # other
+                    add_response["matchedDN"] = ""
+                    add_response["diagnosticMessage"] = "Failed to add entry"
+
+                # Enviar respuesta al cliente
+                ldap_response = LDAPMessage()
+                ldap_response["messageID"] = ldap_message["messageID"]
+                ldap_response["protocolOp"]["addResponse"] = add_response
+                writer.write(encoder.encode(ldap_response))
+                await writer.drain()
+                print("Respuesta de Add enviada")
+            else:
+                raise ValueError(
+                    f"Operación LDAP no soportada: {protocol_op.getName()}"
+                )
 
         except Exception as e:
-            # Manejar otros errores
-            error_response = {
-                "status": "error",
-                "message": "Error interno del servidor",
-            }
-            writer.write(str(error_response).encode())
-            await writer.drain()
+            print(f"Error: {str(e)}")
 
         finally:
             writer.close()
             await writer.wait_closed()
 
-    async def run(self):
-        server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        print(f"LDAP Middleware running on {self.host}:{self.port}")
+    async def run(self, host="127.0.0.1", port=1389):
+        server = await asyncio.start_server(self.handle_client, host, port)
+        print(f"LDAP Middleware running on {host}:{port}")
         async with server:
             await server.serve_forever()

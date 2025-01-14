@@ -2,3 +2,6 @@ ldap3
 asyncio
 pytest
 python-dotenv
+flask
+dnspython
+requests
