@@ -1,6 +1,12 @@
 import asyncio
 from pyasn1.codec.ber import decoder, encoder
-from ldap3.protocol.rfc4511 import LDAPMessage, BindResponse, AddResponse, ResultCode
+from ldap3.protocol.rfc4511 import (
+    LDAPMessage,
+    BindResponse,
+    AddResponse,
+    SearchResultEntry,
+    SearchResultDone,
+)
 
 from middleware.request_parser import LDAPRequestParser
 from middleware.dns_discovery import DNSAutoDiscovery
@@ -24,87 +30,123 @@ class LDAPMiddleware:
         print(f"Conexión desde: {client_address}")
 
         try:
-            # Leer datos en binario
-            data = await reader.read(1024)
-            if not data:
-                print("Conexión cerrada por el cliente")
-                return
+            while True:  # Mantener la conexión abierta mientras el cliente esté activo
+                # Leer datos en binario
+                data = await reader.read(1024)
+                if not data:  # Si no hay datos, el cliente cerró la conexión
+                    print(f"Cliente {client_address} cerró la conexión.")
+                    break
 
-            print(f"Solicitud binaria recibida: {data}")
+                print(f"Solicitud binaria recibida: {data}")
 
-            # Decodificar el mensaje LDAP
-            ldap_message, _ = decoder.decode(data, asn1Spec=LDAPMessage())
-            print(f"Mensaje LDAP decodificado: {ldap_message.prettyPrint()}")
+                # Decodificar el mensaje LDAP
+                ldap_message, _ = decoder.decode(data, asn1Spec=LDAPMessage())
+                print(f"Mensaje LDAP decodificado: {ldap_message.prettyPrint()}")
 
-            # Identificar la operación
-            protocol_op = ldap_message["protocolOp"]
-            print(f"Operación LDAP: {protocol_op.getName()}")
+                # Identificar la operación
+                protocol_op = ldap_message["protocolOp"]
+                print(f"Operación LDAP: {protocol_op.getName()}")
 
-            if protocol_op.getName() == "bindRequest":
-                # Procesar Bind Request
-                bind_request = protocol_op["bindRequest"]
-                dn = str(bind_request["name"])
-                password = str(bind_request["authentication"]["simple"])
+                if protocol_op.getName() == "bindRequest":
+                    # Procesar Bind Request
+                    bind_request = protocol_op["bindRequest"]
+                    dn = str(bind_request["name"])
+                    password = str(bind_request["authentication"]["simple"])
 
-                print(f"Bind Request recibido: dn={dn}, password={password}")
-                if self.ldap_handler.validate_credentials(dn, password):
-                    bind_response = BindResponse()
-                    bind_response["resultCode"] = 0  # success
-                    bind_response["matchedDN"] = dn
-                    bind_response["diagnosticMessage"] = "Bind successful"
+                    print(f"Bind Request recibido: dn={dn}, password={password}")
+                    if self.ldap_handler.validate_credentials(dn, password):
+                        bind_response = BindResponse()
+                        bind_response["resultCode"] = 0  # success
+                        bind_response["matchedDN"] = dn
+                        bind_response["diagnosticMessage"] = "Bind successful"
+                    else:
+                        bind_response = BindResponse()
+                        bind_response["resultCode"] = 49  # invalidCredentials
+                        bind_response["matchedDN"] = ""
+                        bind_response["diagnosticMessage"] = "Invalid credentials"
+
+                    # Enviar respuesta al cliente
+                    ldap_response = LDAPMessage()
+                    ldap_response["messageID"] = ldap_message["messageID"]
+                    ldap_response["protocolOp"]["bindResponse"] = bind_response
+                    writer.write(encoder.encode(ldap_response))
+                    await writer.drain()
+                    print("Respuesta de Bind enviada")
+
+                elif protocol_op.getName() == "searchRequest":
+                    # Procesar Search Request (Root DSE)
+                    print("Search Request recibido")
+                    search_result_entry = SearchResultEntry()
+                    search_result_entry["objectName"] = ""
+                    search_result_entry["attributes"] = [
+                        {"type": "supportedLDAPVersion", "vals": ["3"]}
+                    ]
+
+                    search_result_done = SearchResultDone()
+                    search_result_done["resultCode"] = 0  # success
+                    search_result_done["matchedDN"] = ""
+                    search_result_done["diagnosticMessage"] = "Search successful"
+
+                    # Enviar resultados de búsqueda
+                    ldap_response_entry = LDAPMessage()
+                    ldap_response_entry["messageID"] = ldap_message["messageID"]
+                    ldap_response_entry["protocolOp"][
+                        "searchResEntry"
+                    ] = search_result_entry
+                    writer.write(encoder.encode(ldap_response_entry))
+                    await writer.drain()
+
+                    ldap_response_done = LDAPMessage()
+                    ldap_response_done["messageID"] = ldap_message["messageID"]
+                    ldap_response_done["protocolOp"][
+                        "searchResDone"
+                    ] = search_result_done
+                    writer.write(encoder.encode(ldap_response_done))
+                    await writer.drain()
+                    print("Respuesta de Search enviada")
+
+                elif protocol_op.getName() == "addRequest":
+                    # Procesar Add Request
+                    add_request = protocol_op["addRequest"]
+                    dn = str(add_request["entry"])
+                    attributes = {
+                        str(attr["type"]): [str(value) for value in attr["vals"]]
+                        for attr in add_request["attributes"]
+                    }
+
+                    print(f"Add Request recibido: dn={dn}, attributes={attributes}")
+                    if self.ldap_handler.add_entry(dn, attributes):
+                        add_response = AddResponse()
+                        add_response["resultCode"] = 0  # success
+                        add_response["matchedDN"] = dn
+                        add_response["diagnosticMessage"] = "Add successful"
+                    else:
+                        add_response = AddResponse()
+                        add_response["resultCode"] = 80  # other
+                        add_response["matchedDN"] = ""
+                        add_response["diagnosticMessage"] = "Failed to add entry"
+
+                    # Enviar respuesta al cliente
+                    ldap_response = LDAPMessage()
+                    ldap_response["messageID"] = ldap_message["messageID"]
+                    ldap_response["protocolOp"]["addResponse"] = add_response
+                    writer.write(encoder.encode(ldap_response))
+                    await writer.drain()
+                    print("Respuesta de Add enviada")
+
                 else:
-                    bind_response = BindResponse()
-                    bind_response["resultCode"] = 49  # invalidCredentials
-                    bind_response["matchedDN"] = ""
-                    bind_response["diagnosticMessage"] = "Invalid credentials"
-
-                # Enviar respuesta al cliente
-                ldap_response = LDAPMessage()
-                ldap_response["messageID"] = ldap_message["messageID"]
-                ldap_response["protocolOp"]["bindResponse"] = bind_response
-                writer.write(encoder.encode(ldap_response))
-                await writer.drain()
-                print("Respuesta de Bind enviada")
-
-            elif protocol_op.getName() == "addRequest":
-                # Procesar Add Request
-                add_request = protocol_op["addRequest"]
-                dn = str(add_request["entry"])
-                attributes = {
-                    str(attr["type"]): [str(value) for value in attr["vals"]]
-                    for attr in add_request["attributes"]
-                }
-
-                print(f"Add Request recibido: dn={dn}, attributes={attributes}")
-                if self.ldap_handler.add_entry(dn, attributes):
-                    add_response = AddResponse()
-                    add_response["resultCode"] = 0  # success
-                    add_response["matchedDN"] = dn
-                    add_response["diagnosticMessage"] = "Add successful"
-                else:
-                    add_response = AddResponse()
-                    add_response["resultCode"] = 80  # other
-                    add_response["matchedDN"] = ""
-                    add_response["diagnosticMessage"] = "Failed to add entry"
-
-                # Enviar respuesta al cliente
-                ldap_response = LDAPMessage()
-                ldap_response["messageID"] = ldap_message["messageID"]
-                ldap_response["protocolOp"]["addResponse"] = add_response
-                writer.write(encoder.encode(ldap_response))
-                await writer.drain()
-                print("Respuesta de Add enviada")
-            else:
-                raise ValueError(
-                    f"Operación LDAP no soportada: {protocol_op.getName()}"
-                )
+                    raise ValueError(
+                        f"Operación LDAP no soportada: {protocol_op.getName()}"
+                    )
 
         except Exception as e:
             print(f"Error: {str(e)}")
 
         finally:
+            # Solo cerrar la conexión si el cliente ya no está activo
             writer.close()
             await writer.wait_closed()
+            print("Conexión cerrada correctamente")
 
     async def run(self, host="127.0.0.1", port=1389):
         server = await asyncio.start_server(self.handle_client, host, port)
