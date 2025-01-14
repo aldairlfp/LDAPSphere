@@ -4,6 +4,7 @@ from ldap3.protocol.rfc4511 import (
     LDAPMessage,
     BindResponse,
     AddResponse,
+    DelResponse,
     SearchResultEntry,
     SearchResultDone,
 )
@@ -133,6 +134,35 @@ class LDAPMiddleware:
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
                     print("Respuesta de Add enviada")
+                elif protocol_op.getName() == "delRequest":
+                    # Procesar Delete Request
+                    dn = str(protocol_op["delRequest"])
+                    print(f"Delete Request recibido: dn={dn}")
+
+                    result = self.ldap_handler.delete_entry(dn)
+                    if result["success"]:
+                        del_response = DelResponse()
+                        del_response["resultCode"] = 0  # success
+                        del_response["matchedDN"] = dn
+                        del_response["diagnosticMessage"] = result["description"]
+                    else:
+                        del_response = DelResponse()
+                        del_response["resultCode"] = 80  # other
+                        del_response["matchedDN"] = ""
+                        del_response["diagnosticMessage"] = result["description"]
+
+                    # Enviar respuesta al cliente
+                    ldap_response = LDAPMessage()
+                    ldap_response["messageID"] = ldap_message["messageID"]
+                    ldap_response["protocolOp"]["delResponse"] = del_response
+                    writer.write(encoder.encode(ldap_response))
+                    await writer.drain()
+                    print(f"Respuesta de Delete enviada: {result}")
+
+                elif protocol_op.getName() == "unbindRequest":
+                    # Procesar Unbind Request
+                    print("Unbind Request recibido: cerrando la conexión.")
+                    break  # Salir del bucle para cerrar la conexión
 
                 else:
                     raise ValueError(
