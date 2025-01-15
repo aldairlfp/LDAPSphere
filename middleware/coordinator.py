@@ -1,6 +1,6 @@
 import requests
 from middleware.dns_discovery import DNSAutoDiscovery
-from middleware.utils import get_local_address  # Nueva función para obtener la IP local
+from middleware.utils import get_local_address
 
 
 class MiddlewareCoordinator:
@@ -16,14 +16,15 @@ class MiddlewareCoordinator:
         discovery = DNSAutoDiscovery(self.dns_name)
         replicas = discovery.get_replica_ips()
         print(f"Réplicas descubiertas: {replicas}")
-    
+
         # Ordenar las IPs y determinar el liderazgo
         sorted_replicas = sorted(replicas)
-    
+        self.replicas = sorted_replicas
+
         # La primera IP en la lista se considera como posible líder
         potential_leader = sorted_replicas[0]
         print(f"Evaluando liderazgo con {potential_leader} como líder potencial.")
-    
+
         if potential_leader == self.my_address:
             # Soy la primera IP, por lo tanto, soy el líder
             self.is_leader = True
@@ -31,15 +32,24 @@ class MiddlewareCoordinator:
         else:
             # Verificar si el supuesto líder está en línea y es válido
             try:
-                response = requests.get(f"http://{potential_leader}:5000/health", timeout=5)
-                if response.status_code == 200 and response.json().get("role") == "leader":
+                response = requests.get(
+                    f"http://{potential_leader}:5000/health", timeout=5
+                )
+                if (
+                    response.status_code == 200
+                    and response.json().get("role") == "leader"
+                ):
                     print(f"Líder confirmado en {potential_leader}. Registrándose...")
                     self.register_with_leader(potential_leader)
                 else:
-                    print(f"Líder en {potential_leader} no válido. Asumiendo liderazgo.")
+                    print(
+                        f"Líder en {potential_leader} no válido. Asumiendo liderazgo."
+                    )
                     self.is_leader = True
             except Exception as e:
-                print(f"No se pudo conectar con {potential_leader}: {e}. Asumiendo liderazgo.")
+                print(
+                    f"No se pudo conectar con {potential_leader}: {e}. Asumiendo liderazgo."
+                )
                 self.is_leader = True
 
     def register_with_leader(self, leader_address):
@@ -62,3 +72,26 @@ class MiddlewareCoordinator:
 
     def get_replicas(self):
         return self.replicas
+
+    def replicate_operation(self, operation, data):
+        """
+        Replica una operación (add/delete) a todas las réplicas registradas.
+        Args:
+            operation (str): Tipo de operación ('add' o 'delete').
+            data (dict): Datos de la operación.
+        """
+        print(self.replicas)
+        for replica in self.replicas:
+            try:
+                response = requests.post(
+                    f"http://{replica}:5000/replicate",
+                    json={"operation": operation, "data": data},
+                )
+                if response.status_code == 200:
+                    print(f"Operación {operation} replicada exitosamente en {replica}")
+                else:
+                    print(
+                        f"Error replicando operación {operation} en {replica}: {response.text}"
+                    )
+            except Exception as e:
+                print(f"Error conectando con la réplica {replica}: {e}")

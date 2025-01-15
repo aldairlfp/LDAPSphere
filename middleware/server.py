@@ -15,8 +15,8 @@ from middleware.coordinator import MiddlewareCoordinator
 
 
 class LDAPMiddleware:
-    def __init__(self, dns_name, ldap_handler):
-        self.coordinator = MiddlewareCoordinator(dns_name)
+    def __init__(self, coordinator, ldap_handler):
+        self.coordinator = coordinator
         self.ldap_handler = ldap_handler
         self.sessions = {}  # Almacenar el estado por dirección IP
 
@@ -48,7 +48,11 @@ class LDAPMiddleware:
                 protocol_op = ldap_message["protocolOp"]
                 print(f"Operación LDAP: {protocol_op.getName()}")
 
-                if protocol_op.getName() == "bindRequest":
+                if protocol_op.getName() == "unbindRequest":
+                    # Procesar Unbind Request
+                    print("Unbind Request recibido: cerrando la conexión.")
+                    break  # Salir del bucle para cerrar la conexión
+                elif protocol_op.getName() == "bindRequest":
                     # Procesar Bind Request
                     bind_request = protocol_op["bindRequest"]
                     dn = str(bind_request["name"])
@@ -121,6 +125,15 @@ class LDAPMiddleware:
                         add_response["resultCode"] = 0  # success
                         add_response["matchedDN"] = dn
                         add_response["diagnosticMessage"] = "Add successful"
+
+                        print(self.coordinator.is_leader)
+                        # Replicar la operación a las réplicas
+                        if self.coordinator.is_leader:
+                            print("Replicando operación ADD a las réplicas")
+                            self.coordinator.replicate_operation(
+                                "add", {"dn": dn, "attributes": attributes}
+                            )
+
                     else:
                         add_response = AddResponse()
                         add_response["resultCode"] = 80  # other
@@ -134,6 +147,7 @@ class LDAPMiddleware:
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
                     print("Respuesta de Add enviada")
+
                 elif protocol_op.getName() == "delRequest":
                     # Procesar Delete Request
                     dn = str(protocol_op["delRequest"])
@@ -145,6 +159,11 @@ class LDAPMiddleware:
                         del_response["resultCode"] = 0  # success
                         del_response["matchedDN"] = dn
                         del_response["diagnosticMessage"] = result["description"]
+
+                        # Replicar la operación a las réplicas
+                        if self.coordinator.is_leader:
+                            self.coordinator.replicate_operation("delete", {"dn": dn})
+
                     else:
                         del_response = DelResponse()
                         del_response["resultCode"] = 80  # other
@@ -158,11 +177,6 @@ class LDAPMiddleware:
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
                     print(f"Respuesta de Delete enviada: {result}")
-
-                elif protocol_op.getName() == "unbindRequest":
-                    # Procesar Unbind Request
-                    print("Unbind Request recibido: cerrando la conexión.")
-                    break  # Salir del bucle para cerrar la conexión
 
                 else:
                     raise ValueError(
