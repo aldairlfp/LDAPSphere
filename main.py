@@ -23,22 +23,23 @@ class LDAPReplicator(SyncObj):
     def __init__(self, self_address, partner_addresses, on_log_applied_callback=None):
         super().__init__(self_address, partner_addresses)
         self.__logs = []
-        self.__on_log_applied_callback = on_log_applied_callback
+        self.__on_log_applied_callback = (
+            on_log_applied_callback  # Mantén el callback local
+        )
 
     @replicated
     def replicate_operation(self, operation, dn, attributes):
         """Registra y propaga operaciones LDAP."""
-        print(f"Replicando operación {operation} en {dn}: {attributes}")
         log_entry = {"operation": operation, "dn": dn, "attributes": attributes}
         self.__logs.append(log_entry)
-
-        if self.__on_log_applied_callback:
-            self.__on_log_applied_callback(log_entry)
-
+        print(f"Operación replicada: {log_entry}")
         return log_entry
 
-    def get_logs(self):
-        return self.__logs
+    def apply_logs(self):
+        """Aplica todos los logs replicados que aún no han sido procesados."""
+        for log_entry in self.__logs:
+            if self.__on_log_applied_callback:
+                self.__on_log_applied_callback(log_entry)
 
 
 # Clase para el middleware LDAP Proxy
@@ -51,10 +52,7 @@ class LDAPProxyServer:
         self.replicator = LDAPReplicator(raft_self, raft_partners, self.apply_log)
 
     def apply_log(self, log_entry):
-        """
-        Aplica una operación replicada al servidor LDAP local.
-        Este método será invocado para cada operación nueva replicada.
-        """
+        """Aplica un log replicado al servidor LDAP local."""
         operation = log_entry["operation"]
         dn = log_entry["dn"]
         attributes = log_entry["attributes"]
@@ -64,15 +62,23 @@ class LDAPProxyServer:
             success = self.ldap_handler.add_entry(dn, attributes)
             if not success:
                 print(f"Error al aplicar operación ADD en {dn}")
-
         elif operation == "delete":
             print(f"Aplicando operación DELETE en {dn}")
             result = self.ldap_handler.delete_entry(dn)
             if not result["success"]:
-                print(f"Error al aplicar operación DELETE en {dn}: {result}")
-
+                print(f"Error al aplicar operación DELETE en {dn}")
         else:
             print(f"Operación no soportada: {operation}")
+
+    async def periodic_tasks(self):
+        """Ejecuta tareas periódicas como la aplicación de logs."""
+        while True:
+            if self.replicator._isLeader():
+                print("Soy el líder, manejando operaciones locales")
+            else:
+                print("Soy un seguidor, aplicando logs replicados")
+                self.replicator.apply_logs()
+            await asyncio.sleep(5)
 
     async def handle_client(self, reader, writer):
         """
@@ -239,6 +245,7 @@ class LDAPProxyServer:
     async def run(self, host="127.0.0.1", port=1389):
         server = await asyncio.start_server(self.handle_client, host, port)
         print(f"LDAP Middleware running on {host}:{port}")
+        asyncio.create_task(self.periodic_tasks())
         async with server:
             await server.serve_forever()
 
