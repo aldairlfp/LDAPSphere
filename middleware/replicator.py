@@ -9,12 +9,10 @@ class LDAPReplicator(SyncObj):
         self_address,
         partner_addresses,
         logs_file="logs.json",
-        on_log_applied_callback=None,
     ):
         super().__init__(self_address, partner_addresses)
         self.__logs = []
         self.__log_index = 0
-        self.__on_log_applied_callback = on_log_applied_callback
         self.__logs_file = logs_file
 
         # Cargar logs persistidos desde el archivo
@@ -43,6 +41,10 @@ class LDAPReplicator(SyncObj):
         print(f"Operación replicada: {log_entry}")
         return log_entry
 
+    def get_logs(self):
+        """Devuelve los logs registrados en el nodo"""
+        return self.__logs
+
     def get_last_applied_index(self):
         """Devuelve el índice de la última operación aplicada"""
         return self.__log_index
@@ -67,12 +69,3 @@ class LDAPReplicator(SyncObj):
                 print("Logs guardados en el archivo.")
         except Exception as e:
             print(f"Error guardando los logs: {e}")
-
-    def apply_logs(self):
-        """Aplica los logs replicados desde el último índice"""
-        for log_entry in self.__logs:
-            if log_entry["log_index"] > self.get_last_applied_index():
-                if self.__on_log_applied_callback:
-                    self.__on_log_applied_callback(log_entry)
-                    self.__log_index = log_entry["log_index"]
-                self.save_logs()
