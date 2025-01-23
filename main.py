@@ -18,6 +18,7 @@ if __name__ == "__main__":
 
     # Dirección del nodo actual y nodos en la red
     RAFT_SELF = f"{get_local_address()}:{os.getenv('RAFT_PORT', 5000)}"
+    # RAFT_PARTNERS = os.getenv("RAFT_PARTNERS", "").split(",")
     RAFT_PARTNERS = [
         node
         for node in os.getenv("RAFT_PARTNERS", "").split(",")

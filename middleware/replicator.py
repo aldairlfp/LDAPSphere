@@ -13,13 +13,17 @@ class LDAPReplicator(SyncObj):
         super().__init__(self_address, partner_addresses)
         self.__logs = []
         self.__log_index = 0
-        self.__logs_file = logs_file
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.__logs_file = os.path.join(base_dir, "..", logs_file)
 
         # Cargar logs persistidos desde el archivo
         self.load_logs()
 
     @replicated
-    def replicate_operation(self, operation, dn, attributes):
+    def replicate_operation(
+        self, operation, dn, attributes, source_ip, local_execution=False
+    ):
         """Registra y propaga operaciones LDAP con un índice de log."""
         self.__log_index += 1
         log_entry = {
@@ -27,6 +31,8 @@ class LDAPReplicator(SyncObj):
             "operation": operation,
             "dn": dn,
             "attributes": attributes,
+            "source_ip": source_ip,
+            "local_execution": local_execution,
         }
         self.__logs.append(log_entry)
 
