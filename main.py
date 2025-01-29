@@ -15,18 +15,20 @@ if __name__ == "__main__":
     LDAP_SERVER = os.getenv("LDAP_URL", "ldap://localhost:389")
     LDAP_USER = os.getenv("LDAP_ADMIN_DN", "cn=admin,dc=example,dc=com")
     LDAP_PASSWORD = os.getenv("LDAP_ADMIN_PASSWORD", "1234")
+    DNS_DOMAIN = os.getenv("DNS_DOMAIN", "example.com")
+    FALLBACK_IPS = os.getenv("FALLBACK_IPS", "").split(",")
 
     # Dirección del nodo actual y nodos en la red
-    RAFT_SELF = f"{get_local_address()}:{os.getenv('RAFT_PORT', 5000)}"
-    # RAFT_PARTNERS = os.getenv("RAFT_PARTNERS", "").split(",")
-    RAFT_PARTNERS = [
-        node
-        for node in os.getenv("RAFT_PARTNERS", "").split(",")
-        if node != f"{get_local_address()}:{os.getenv('RAFT_PORT', 5000)}"
-    ]
+    RAFT_SELF = f"{get_local_address()}"
     # Inicializar el servidor proxy
     proxy_server = LDAPProxyServer(
-        LDAP_SERVER, LDAP_USER, LDAP_PASSWORD, RAFT_SELF, RAFT_PARTNERS
+        LDAP_SERVER,
+        LDAP_USER,
+        LDAP_PASSWORD,
+        RAFT_SELF,
+        DNS_DOMAIN,
+        FALLBACK_IPS,
+        os.getenv("RAFT_PORT", 5000),
     )
 
     # Ejecutar el servidor

@@ -15,7 +15,7 @@ from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 
 from middleware.replicator import LDAPReplicator
 from middleware.request_handler import LDAPRequestHandler
-from middleware.utils import get_local_address
+from middleware.utils import discover_addresses, get_local_address
 
 LDAP_OPERATIONS = {0: MODIFY_ADD, 1: MODIFY_DELETE, 2: MODIFY_REPLACE}
 
@@ -27,12 +27,21 @@ class LDAPProxyServer:
         ldap_user,
         ldap_password,
         raft_self,
-        raft_partners,
+        dns_domain,
+        fallback_ips,
+        port=5000,
         logs_file=f"logs_{get_local_address()}.json",
     ):
-        # Conexión al servidor LDAP
+        # Resolve partners dynamically
+        self.raft_partners = discover_addresses(dns_domain, fallback_ips)
+        self.raft_partners = [addr for addr in self.raft_partners if addr != raft_self]
+        self.raft_partners = [f"{addr}:{port}" for addr in self.raft_partners]
+
+        # Existing logic remains unchanged
         self.ldap_handler = LDAPRequestHandler(ldap_server, ldap_user, ldap_password)
-        self.replicator = LDAPReplicator(raft_self, raft_partners, logs_file=logs_file)
+        self.replicator = LDAPReplicator(
+            f"{raft_self}:{port}", self.raft_partners, logs_file=logs_file
+        )
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.last_applied_index_file = os.path.join(
@@ -46,7 +55,7 @@ class LDAPProxyServer:
         self.local_logs = self.load_local_logs()
 
     def load_last_applied_index(self):
-        """Carga el último índice de operación aplicada desde un archivo."""
+        """Loads the last applied operation index from a file."""
         try:
             with open(self.last_applied_index_file, "r") as f:
                 return int(f.read().strip())
@@ -54,12 +63,12 @@ class LDAPProxyServer:
             return 0
 
     def save_last_applied_index(self):
-        """Guarda el índice de la última operación aplicada."""
+        """Saves the index of the last operation applied."""
         with open(self.last_applied_index_file, "w") as f:
             f.write(str(self.last_applied_index))
 
     def load_local_logs(self):
-        """Carga los logs locales desde un archivo."""
+        """Load local logs from a file."""
         try:
             with open(self.local_logs_file, "r") as f:
                 return json.loads(f.read())
@@ -67,12 +76,12 @@ class LDAPProxyServer:
             return []
 
     def save_local_logs(self):
-        """Guarda los logs locales en un archivo."""
+        """Save local logs to a file."""
         with open(self.local_logs_file, "w") as f:
             json.dump(self.local_logs, f)
 
     def apply_logs(self):
-        """Aplica todos los logs pendientes desde el replicador."""
+        """Applies all pending logs from the replicator."""
         logs = self.replicator.get_logs()
         for log_entry in logs:
             if log_entry["log_index"] > self.last_applied_index:
@@ -81,7 +90,7 @@ class LDAPProxyServer:
                 self.save_last_applied_index()
 
     def apply_log(self, log_entry):
-        """Aplica una operación individual al servidor LDAP."""
+        """Applies a single operation to the LDAP server."""
         if (
             log_entry["local_execution"]
             and log_entry["source_ip"] == get_local_address()
@@ -95,20 +104,20 @@ class LDAPProxyServer:
         if operation == "add":
             success = self.ldap_handler.add_entry(dn, attributes)
             if not success:
-                print(f"Error al aplicar operación ADD en {dn}.")
+                print(f"Error when applying ADD operation on {dn}.")
         elif operation == "delete":
             result = self.ldap_handler.delete_entry(dn)
             if not result["success"]:
-                print(f"Error al aplicar operación DELETE en {dn}.")
+                print(f"Error when applying DELETE operation on {dn}.")
         elif operation == "modify":
             result = self.ldap_handler.modify_entry(dn, attributes)
             if not result["success"]:
-                print(f"Error al aplicar operación MODIFY en {dn}.")
+                print(f"Error when applying MODIFY operation on {dn}.")
         else:
-            print(f"Operación no soportada: {operation}")
+            print(f"Unsupported operation: {operation}")
 
     def replicate_operation(self, operation, dn, attributes):
-        """Registra y propaga operaciones LDAP con un índice de log."""
+        """Logs and propagates LDAP operations with a log index."""
         if self.replicator.isReady():
             log_entry = self.replicator.replicate_operation(
                 operation, dn, attributes, get_local_address()
@@ -127,7 +136,7 @@ class LDAPProxyServer:
             self.save_local_logs()
 
     def replicate_local_logs(self):
-        """Replica las operaciones locales pendientes."""
+        """Replicates pending local operations."""
         for log_entry in self.local_logs:
             operation = log_entry["operation"]
             dn = log_entry["dn"]
@@ -141,7 +150,7 @@ class LDAPProxyServer:
         self.save_local_logs()
 
     async def periodic_tasks(self):
-        """Ejecuta tareas periódicas como la aplicación de logs."""
+        """Execute periodic tasks such as applying logs."""
         while True:
             # print(self.replicator.get_logs())
             # Save the logs
@@ -149,49 +158,49 @@ class LDAPProxyServer:
                 self.replicate_local_logs()
             self.replicator.save_logs()
             if self.replicator._isLeader():
-                print("Soy el líder, manejando operaciones locales")
+                print("I am the leader, managing local operations")
             else:
-                print("Soy un seguidor, aplicando logs replicados")
+                print("I am a follower, applying replicated logs")
             self.apply_logs()
             await asyncio.sleep(5)
 
     async def handle_client(self, reader, writer):
         """
-        Aquí puedes integrar un servidor para interceptar operaciones
-        desde clientes externos, o un mecanismo para manejar solicitudes.
+        Here you can integrate a server to intercept operations
+        from external clients, or a mechanism to handle requests.
         """
         client_address = writer.get_extra_info("peername")
-        print(f"Conexión desde: {client_address}")
+        print(f"Connection from: {client_address}")
 
         try:
-            while True:  # Mantener la conexión abierta mientras el cliente esté activo
-                # Leer datos en binario
+            while True:  # Keep the connection open while the client is active
+                # Read binary data
                 data = await reader.read(1024)
-                if not data:  # Si no hay datos, el cliente cerró la conexión
-                    print(f"Cliente {client_address} cerró la conexión.")
+                if not data:  # If no data, the client closed the connection
+                    print(f"Client {client_address} closed the connection.")
                     break
 
-                # print(f"Solicitud binaria recibida: {data}")
+                # print(f"Binary request received: {data}")
 
-                # Decodificar el mensaje LDAP
+                # Decode the LDAP message
                 ldap_message, _ = decoder.decode(data, asn1Spec=LDAPMessage())
-                # print(f"Mensaje LDAP decodificado: {ldap_message.prettyPrint()}")
+                # print(f"Decoded LDAP message: {ldap_message.prettyPrint()}")
 
-                # Identificar la operación
+                # Identify the operation
                 protocol_op = ldap_message["protocolOp"]
-                print(f"Operación LDAP: {protocol_op.getName()}")
+                print(f"LDAP operation: {protocol_op.getName()}")
 
                 if protocol_op.getName() == "unbindRequest":
-                    # Procesar Unbind Request
-                    print("Unbind Request recibido: cerrando la conexión.")
-                    break  # Salir del bucle para cerrar la conexión
+                    # Process Unbind Request
+                    print("Unbind Request received: closing the connection.")
+                    break  # Exit the loop to close the connection
                 elif protocol_op.getName() == "bindRequest":
-                    # Procesar Bind Request
+                    # Process Bind Request
                     bind_request = protocol_op["bindRequest"]
                     dn = str(bind_request["name"])
                     password = str(bind_request["authentication"]["simple"])
 
-                    print(f"Bind Request recibido: dn={dn}, password={password}")
+                    print(f"Bind Request received: dn={dn}, password={password}")
                     if self.ldap_handler.validate_credentials(dn, password):
                         bind_response = BindResponse()
                         bind_response["resultCode"] = 0  # success
@@ -203,17 +212,17 @@ class LDAPProxyServer:
                         bind_response["matchedDN"] = ""
                         bind_response["diagnosticMessage"] = "Invalid credentials"
 
-                    # Enviar respuesta al cliente
+                    # Send response to the client
                     ldap_response = LDAPMessage()
                     ldap_response["messageID"] = ldap_message["messageID"]
                     ldap_response["protocolOp"]["bindResponse"] = bind_response
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
-                    print("Respuesta de Bind enviada")
+                    print("Bind response sent")
 
                 elif protocol_op.getName() == "searchRequest":
-                    # Procesar Search Request (Root DSE)
-                    print("Search Request recibido")
+                    # Process Search Request (Root DSE)
+                    print("Search Request received")
                     search_result_entry = SearchResultEntry()
                     search_result_entry["objectName"] = ""
                     search_result_entry["attributes"] = [
@@ -225,7 +234,7 @@ class LDAPProxyServer:
                     search_result_done["matchedDN"] = ""
                     search_result_done["diagnosticMessage"] = "Search successful"
 
-                    # Enviar resultados de búsqueda
+                    # Send search results
                     ldap_response_entry = LDAPMessage()
                     ldap_response_entry["messageID"] = ldap_message["messageID"]
                     ldap_response_entry["protocolOp"][
@@ -241,10 +250,10 @@ class LDAPProxyServer:
                     ] = search_result_done
                     writer.write(encoder.encode(ldap_response_done))
                     await writer.drain()
-                    print("Respuesta de Search enviada")
+                    print("Search response sent")
 
                 elif protocol_op.getName() == "addRequest":
-                    # Procesar Add Request
+                    # Process Add Request
                     add_request = protocol_op["addRequest"]
                     dn = str(add_request["entry"])
                     attributes = {
@@ -252,7 +261,7 @@ class LDAPProxyServer:
                         for attr in add_request["attributes"]
                     }
 
-                    print(f"Add Request recibido: dn={dn}, attributes={attributes}")
+                    print(f"Add Request received: dn={dn}, attributes={attributes}")
                     if self.ldap_handler.add_entry(dn, attributes):
                         add_response = AddResponse()
                         add_response["resultCode"] = 0  # success
@@ -267,18 +276,18 @@ class LDAPProxyServer:
 
                     self.replicate_operation("add", dn, attributes)
 
-                    # Enviar respuesta al cliente
+                    # Send response to the client
                     ldap_response = LDAPMessage()
                     ldap_response["messageID"] = ldap_message["messageID"]
                     ldap_response["protocolOp"]["addResponse"] = add_response
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
-                    print("Respuesta de Add enviada")
+                    print("Add response sent")
 
                 elif protocol_op.getName() == "delRequest":
-                    # Procesar Delete Request
+                    # Process Delete Request
                     dn = str(protocol_op["delRequest"])
-                    print(f"Delete Request recibido: dn={dn}")
+                    print(f"Delete Request received: dn={dn}")
 
                     result = self.ldap_handler.delete_entry(dn)
                     if result["success"]:
@@ -294,32 +303,32 @@ class LDAPProxyServer:
 
                     self.replicate_operation("delete", dn, {})
 
-                    # Enviar respuesta al cliente
+                    # Send response to the client
                     ldap_response = LDAPMessage()
                     ldap_response["messageID"] = ldap_message["messageID"]
                     ldap_response["protocolOp"]["delResponse"] = del_response
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
-                    print(f"Respuesta de Delete enviada: {result}")
+                    print(f"Delete response sent: {result}")
                 elif protocol_op.getName() == "modifyRequest":
-                    # Extraer el DN del objeto a modificar
+                    # Extract the DN of the object to be modified
                     dn = str(
                         protocol_op["modifyRequest"]["object"]
-                    )  # Convertir a cadena
-                    print(f"Modify Request recibido: dn={dn}")
+                    )  # Convert to string
+                    print(f"Modify Request received: dn={dn}")
 
-                    # Procesar los cambios
+                    # Process the changes
                     changes = []
                     for change in protocol_op["modifyRequest"]["changes"]:
                         operation = LDAP_OPERATIONS[
                             change["operation"]
-                        ]  # Mapear operación
+                        ]  # Map operation
                         attribute = str(
                             change["modification"]["type"]
-                        )  # Convertir a cadena
+                        )  # Convert to string
                         values = [
                             str(value) for value in change["modification"]["vals"]
-                        ]  # Convertir a lista de cadenas
+                        ]  # Convert to list of strings
                         changes.append(
                             {
                                 "operation": operation,
@@ -328,14 +337,14 @@ class LDAPProxyServer:
                             }
                         )
 
-                    # Reestructurar cambios para el método modify_entry
+                    # Restructure changes for the modify_entry method
                     ldap_changes = {}
                     for change in changes:
                         ldap_changes.setdefault(change["attribute"], []).append(
                             (change["operation"], change["values"])
                         )
 
-                    # Aplicar la operación al servidor LDAP
+                    # Apply the operation to the LDAP server
                     result = self.ldap_handler.modify_entry(dn, ldap_changes)
                     if result["success"]:
                         modify_response = ModifyResponse()
@@ -344,36 +353,36 @@ class LDAPProxyServer:
                         modify_response["diagnosticMessage"] = result["description"]
                     else:
                         modify_response = ModifyResponse()
-                        modify_response["resultCode"] = 80  # Código de error genérico
+                        modify_response["resultCode"] = 80  # Generic error code
                         modify_response["matchedDN"] = ""
                         modify_response["diagnosticMessage"] = result["description"]
 
-                    # Replicar la operación
+                    # Replicate the operation
                     self.replicate_operation(
                         "modify", dn, ldap_changes
-                    )  # Aquí los cambios ya son serializables
+                    )  # Here the changes are already serializable
 
-                    # Enviar respuesta al cliente
+                    # Send response to the client
                     ldap_response = LDAPMessage()
                     ldap_response["messageID"] = ldap_message["messageID"]
                     ldap_response["protocolOp"]["modifyResponse"] = modify_response
                     writer.write(encoder.encode(ldap_response))
                     await writer.drain()
-                    print(f"Respuesta de Modify enviada: {result}")
+                    print(f"Modify response sent: {result}")
 
                 else:
                     raise ValueError(
-                        f"Operación LDAP no soportada: {protocol_op.getName()}"
+                        f"Unsupported LDAP operation: {protocol_op.getName()}"
                     )
 
         except Exception as e:
             print(f"Error: {str(e)}")
 
         finally:
-            # Solo cerrar la conexión si el cliente ya no está activo
+            # Only close the connection if the client is no longer active
             writer.close()
             await writer.wait_closed()
-            print("Conexión cerrada correctamente")
+            print("Connection closed properly")
 
     async def run(self, host="127.0.0.1", port=1389):
         server = await asyncio.start_server(self.handle_client, host, port)

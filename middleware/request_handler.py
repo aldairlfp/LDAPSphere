@@ -6,15 +6,15 @@ class LDAPRequestHandler:
 
     def validate_credentials(self, dn, password, timeout=5):
         """
-        Valida las credenciales del usuario contra el servidor LDAP.
+        Validate user credentials against the LDAP server.
 
         Args:
-            dn (str): Distinguished Name del usuario.
-            password (str): Contraseña del usuario.
-            timeout (int): Tiempo máximo de espera en segundos.
+            dn (str): User Distinguished Name.
+            password (str): User password.
+            timeout (int): Maximum waiting time in seconds.
 
         Returns:
-            bool: True si la autenticación fue exitosa, False en caso contrario.
+            bool: True if authentication was successful, False otherwise.
         """
         from ldap3 import Server, Connection, ALL
 
@@ -25,13 +25,13 @@ class LDAPRequestHandler:
             # Establecer la conexión con el servidor LDAP
             conn = Connection(server, user=dn, password=password, read_only=True)
             if conn.bind():
-                print(f"Autenticación exitosa para {dn}")
+                print(f"Successful authentication for {dn}")
                 return True
             else:
-                print(f"Fallo de autenticación para {dn}: {conn.result}")
+                print(f"Authentication failure for {dn}: {conn.result}")
                 return False
         except Exception as e:
-            print(f"Error conectando con el servidor LDAP: {e}")
+            print(f"Error connecting to the LDAP server: {e}")
             return False
 
     def add_entry(self, dn, attributes):

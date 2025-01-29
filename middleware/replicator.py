@@ -24,7 +24,7 @@ class LDAPReplicator(SyncObj):
     def replicate_operation(
         self, operation, dn, attributes, source_ip, local_execution=False
     ):
-        """Registra y propaga operaciones LDAP con un índice de log."""
+        """Register a new operation in the logs"""
         self.__log_index += 1
         log_entry = {
             "log_index": self.__log_index,
@@ -42,36 +42,36 @@ class LDAPReplicator(SyncObj):
 
             pickle.dumps(log_entry)
         except Exception as e:
-            print(f"Error al serializar el log: {log_entry} -> {e}")
+            print(f"Error serializing the log: {log_entry} -> {e}")
 
-        print(f"Operación replicada: {log_entry}")
+        print(f"Replicated operation: {log_entry}")
         return log_entry
 
     def get_logs(self):
-        """Devuelve los logs registrados en el nodo"""
+        """Returns the logs registered in the node"""
         return self.__logs
 
     def get_last_applied_index(self):
-        """Devuelve el índice de la última operación aplicada"""
+        """Returns the index of the last operation applied"""
         return self.__log_index
 
     def load_logs(self):
-        """Carga los logs persistidos desde el archivo"""
+        """Load persisted logs from file"""
         if os.path.exists(self.__logs_file):
             with open(self.__logs_file, "r") as f:
                 logs = json.load(f)
                 self.__logs = logs.get("logs", [])
                 if self.__logs:
                     self.__log_index = self.__logs[-1]["log_index"]
-                print("Logs cargados desde el archivo.")
+                print("Logs loaded from file.")
         else:
-            print("No se encontraron logs persistidos. Comenzando desde cero.")
+            print("No persisted logs were found. Starting from scratch.")
 
     def save_logs(self):
-        """Guarda los logs en el archivo."""
+        """Save the logs to the file."""
         try:
             with open(self.__logs_file, "w") as f:
                 json.dump({"logs": self.__logs}, f)
-                print("Logs guardados en el archivo.")
+                print("Logs saved in the file.")
         except Exception as e:
-            print(f"Error guardando los logs: {e}")
+            print(f"Error saving logs: {e}")
