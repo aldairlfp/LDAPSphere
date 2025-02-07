@@ -15,6 +15,7 @@ from ldap3.protocol.rfc4511 import (
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 
 from metrics.measure_ldap_direct import measure_direct_ldap_query
+from middleware.ldap_parser import LDAPParser
 from middleware.replicator import LDAPReplicator
 from middleware.request_handler import LDAPRequestHandler
 from middleware.utils import discover_addresses, get_local_address
@@ -175,104 +176,87 @@ class LDAPProxyServer:
 
     async def handle_client(self, reader, writer):
         """
-        Here you can integrate a server to intercept operations
-        from external clients, or a mechanism to handle requests.
+        Handles incoming LDAP client requests, ensuring complete message reads and preventing hangs.
         """
         client_address = writer.get_extra_info("peername")
         print(f"Connection from: {client_address}")
 
         try:
-            while True:  # Keep the connection open while the client is active
+            while True:
                 start_time = time.perf_counter()
+                raw_data = b""  # Buffer for storing received data
 
-                # Read binary data
                 try:
-                    # Read LDAP request (with a timeout to prevent hangs)
-                    data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
+                    while True:
+                        try:
+                            # Read LDAP request with timeout to prevent hangs
+                            chunk = await asyncio.wait_for(
+                                reader.read(4096), timeout=5.0
+                            )
 
-                    if not data:  # Client closed connection
-                        print(f"Client {client_address} closed the connection.")
-                        break
+                            if not chunk:  # Connection closed
+                                print(f"Client {client_address} closed the connection.")
+                                return
 
-                    # Decode the LDAP message
-                    try:
-                        ldap_message, _ = decoder.decode(data, asn1Spec=LDAPMessage())
-                    except Exception as decode_error:
-                        print(f"⚠️ Decode Error: {decode_error} - Data: {data}")
-                        continue  # Skip this iteration if decoding fails
+                            raw_data += chunk  # Append received chunk
 
-                    # Decode the LDAP message
-                    ldap_message, _ = decoder.decode(data, asn1Spec=LDAPMessage())
+                            # Attempt to decode the message
+                            try:
+                                ldap_message, operation_name, error = LDAPParser.parse(
+                                    raw_data
+                                )
+                                break  # Successfully decoded, exit loop
+                            except Exception:
+                                continue  # Keep reading until full message is received
+
+                        except asyncio.TimeoutError:
+                            print(
+                                f"⚠️ Timeout: No complete LDAP message received from {client_address}."
+                            )
+                            return  # Close the connection on timeout
 
                     # Identify the operation
                     protocol_op = ldap_message["protocolOp"]
-                    print(f"LDAP operation: {protocol_op.getName()}")
 
-                    if protocol_op.getName() == "unbindRequest":
+                    # Handle different LDAP operations
+                    if operation_name == "unbindRequest":
                         await self.handle_unbind_request(writer)
-                        break  # Exit the loop to close the connection
-                    elif protocol_op.getName() == "bindRequest":
+                        break  # Close connection after unbind
+                    elif operation_name == "bindRequest":
                         await self.handle_bind_request(
                             ldap_message, protocol_op, writer
                         )
-                    elif protocol_op.getName() == "addRequest":
+                    elif operation_name == "addRequest":
                         await self.handle_add_request(ldap_message, protocol_op, writer)
-                    elif protocol_op.getName() == "delRequest":
+                    elif operation_name == "delRequest":
                         await self.handle_delete_request(
                             ldap_message, protocol_op, writer
                         )
-                    elif protocol_op.getName() == "modifyRequest":
+                    elif operation_name == "modifyRequest":
                         await self.handle_modify_request(
                             ldap_message, protocol_op, writer
                         )
                     else:
-                        raw_response = self.ldap_handler.forward_request(data)
+                        print(f"Forwarding unhandled operation: {operation_name}")
+                        response = self.ldap_handler.forward_request(raw_data)
 
-                        if raw_response:
-                            while raw_response:
-                                try:
-                                    # Decode and process one LDAP message at a time
-                                    ldap_response, rest = decoder.decode(
-                                        raw_response, asn1Spec=LDAPMessage()
-                                    )
-                                    print("aaaa1")
+                        if response:
+                            writer.write(response)
+                            await writer.drain()
+                        else:
+                            print("Error: No response received from LDAP server.")
 
-                                    # Encode properly before sending back
-                                    encoded_response = encoder.encode(ldap_response)
-                                    writer.write(encoded_response)
-                                    await writer.drain()
-                                    print("aaaa2")
-
-                                    # If it's the final response message (e.g., searchResDone), stop
-                                    if (
-                                        ldap_response["protocolOp"].getName()
-                                        == "searchResDone"
-                                    ):
-                                        break
-
-                                    print("aaaa3")
-
-                                    raw_response = (
-                                        rest  # Process remaining response data
-                                    )
-                                except:
-                                    break  # Break on decoding failure (unlikely)
-                except TimeoutError as e:
-                    print(
-                        f"⚠️ Timeout: No data received from {client_address} in 5 seconds."
-                    )
-                    continue  # Retry reading instead of closing the connection
+                except Exception as e:
+                    print(f"⚠️ Error reading data: {str(e)}")
+                    return
 
         except Exception as e:
-            print(f"Error: {str(e)}")
+            print(f"Error in handle_client: {str(e)}")
 
         finally:
             writer.close()
             await writer.wait_closed()
-            print("Connection closed properly")
-
-            end_time = time.perf_counter()
-            latency = end_time - start_time
+            print(f"Connection closed properly with {client_address}")
 
     async def handle_unbind_request(self, writer):
         """Handles an LDAP unbind request by properly closing the connection."""

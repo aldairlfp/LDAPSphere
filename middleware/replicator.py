@@ -36,14 +36,6 @@ class LDAPReplicator(SyncObj):
         }
         self.__logs.append(log_entry)
 
-        # Verifica que el log sea serializable
-        try:
-            import pickle
-
-            pickle.dumps(log_entry)
-        except Exception as e:
-            print(f"Error serializing the log: {log_entry} -> {e}")
-
         print(f"Replicated operation: {log_entry}")
         return log_entry
 
@@ -72,6 +64,6 @@ class LDAPReplicator(SyncObj):
         try:
             with open(self.__logs_file, "w") as f:
                 json.dump({"logs": self.__logs}, f)
-                print("Logs saved in the file.")
+                # print("Logs saved in the file.")
         except Exception as e:
             print(f"Error saving logs: {e}")

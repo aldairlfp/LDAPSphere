@@ -108,10 +108,8 @@ class LDAPRequestHandler:
 
             response_data = b""
             while True:
-                print("a2")
                 # Use select() to wait for readable data with a timeout
                 ready, _, _ = select.select([conn.socket], [], [], 2.0)
-                print("a3")
                 if not ready:  # Timeout reached, exit loop
                     break
 
@@ -120,7 +118,6 @@ class LDAPRequestHandler:
                     break
 
                 response_data += chunk
-                print("a4")
 
                 # Stop if we've received a complete LDAP message (handled in handle_client)
                 if len(chunk) < 4096:
