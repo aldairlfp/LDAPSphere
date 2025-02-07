@@ -156,16 +156,10 @@ class LDAPProxyServer:
         """Applies all pending logs from the replicator."""
         logs = self.replicator.get_logs()
         for log_entry in logs:
-            # print(logs)
-            # print(self.logs)
-            # print(self.last_applied_index)
             if log_entry["log_index"] > self.last_applied_index:
                 self.apply_log(log_entry)
-                print("A111")
                 self.last_applied_index = log_entry["log_index"]
-                print("A112")
                 self.save_last_applied_index()
-                print("A113")
 
     def apply_log(self, log_entry):
         """Applies a single operation to the LDAP server."""
@@ -214,14 +208,21 @@ class LDAPProxyServer:
         while True:
             # print(self.replicator.get_logs())
             # Save the logs
-            print("A1")
             if self.replicator.isReady():
                 self.replicate_local_logs()
-            if self.replicator._isLeader():
-                print("I am the leader, managing local operations")
-            else:
-                print("I am a follower, applying replicated logs")
-            print("A4")
+
+            print("Logs:")
+            for log in self.logs:
+                print({k: v for k, v in log.items() if k != "raw_request"})
+
+            print("Local Logs:")
+            for log in self.local_logs:
+                print({k: v for k, v in log.items() if k != "raw_request"})
+
+            # if self.replicator._isLeader():
+            #     print("I am the leader, managing local operations")
+            # else:
+            #     print("I am a follower, applying replicated logs")
             self.apply_logs()
             await asyncio.sleep(5)
 
