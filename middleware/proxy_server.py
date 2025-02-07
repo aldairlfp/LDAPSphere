@@ -1,7 +1,6 @@
 import asyncio
-import json
 import os
-import time
+import sqlite3
 from pyasn1.codec.ber import decoder, encoder
 from ldap3.protocol.rfc4511 import (
     LDAPMessage,
@@ -46,20 +45,58 @@ class LDAPProxyServer:
 
         # Existing logic remains unchanged
         self.ldap_handler = LDAPRequestHandler(ldap_server, ldap_user, ldap_password)
-        self.replicator = LDAPReplicator(
-            f"{raft_self}:{port}", self.raft_partners, logs_file=logs_file
-        )
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        self.setup_database(base_dir)
+        self.local_logs = self.load_local_logs()
+        self.logs = self.load_replicated_logs()
+
+        self.replicator = LDAPReplicator(
+            f"{raft_self}:{port}", self.raft_partners, self.logs
+        )
+
         self.last_applied_index_file = os.path.join(
             base_dir, "..", f"last_applied_index_{get_local_address()}.txt"
         )
-        self.local_logs_file = os.path.join(
-            base_dir, "..", f"local_logs_{get_local_address()}.json"
-        )
-
         self.last_applied_index = self.load_last_applied_index()
-        self.local_logs = self.load_local_logs()
+
+    def setup_database(self, base_dir):
+        """Initialize SQLite databases for logs and local logs"""
+        logs_file = os.path.join(
+            base_dir, "..", f"replicated_logs_{get_local_address()}.db"
+        )
+        local_logs_file = os.path.join(
+            base_dir, "..", f"local_logs_{get_local_address()}.db"
+        )
+        self.local_db = sqlite3.connect(local_logs_file, check_same_thread=False)
+        self.replica_db = sqlite3.connect(logs_file, check_same_thread=False)
+
+        with self.local_db:
+            self.local_db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS local_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation TEXT,
+                    raw_request BLOB,
+                    source_ip TEXT
+                )
+            """
+            )
+
+        with self.replica_db:
+            self.replica_db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS replicated_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    log_index INTEGER UNIQUE,
+                    operation TEXT,
+                    raw_request BLOB,
+                    source_ip TEXT,
+                    local_execution BOOLEAN DEFAULT 0
+                )
+            """
+            )
 
     def load_last_applied_index(self):
         """Loads the last applied operation index from a file."""
@@ -75,26 +112,60 @@ class LDAPProxyServer:
             f.write(str(self.last_applied_index))
 
     def load_local_logs(self):
-        """Load local logs from a file."""
-        try:
-            with open(self.local_logs_file, "r") as f:
-                return json.loads(f.read())
-        except FileNotFoundError:
-            return []
+        """Retrieve all unreplicated operations"""
+        with self.local_db:
+            logs = self.local_db.execute(
+                "SELECT id, operation, raw_request FROM local_logs"
+            ).fetchall()
+        return [
+            {"id": idX, "operation": op, "raw_request": req} for idX, op, req in logs
+        ]
 
-    def save_local_logs(self):
-        """Save local logs to a file."""
-        with open(self.local_logs_file, "w") as f:
-            json.dump(self.local_logs, f)
+    def load_replicated_logs(self):
+        """Retrieve all replicated operations"""
+        with self.replica_db:
+            logs = self.replica_db.execute(
+                "SELECT log_index, operation, raw_request FROM replicated_logs"
+            ).fetchall()
+        return [
+            {"log_index": idx, "operation": op, "raw_request": req}
+            for idx, op, req in logs
+        ]
+
+    def save_local_log(self, operation, raw_request):
+        """Save an operation to the local log (before replication) and return the row added."""
+        with self.local_db:
+            cursor = self.local_db.execute(
+                "INSERT INTO local_logs (operation, raw_request, source_ip) VALUES (?, ?, ?)",
+                (operation, raw_request, get_local_address()),
+            )
+            row_id = cursor.lastrowid
+        print(f"✅ Saved local operation: {operation}")
+        return {"id": row_id, "operation": operation, "raw_request": raw_request}
+
+    def save_replicated_log(self, log_index, operation, raw_request):
+        """Save a replicated operation (after reaching consensus)"""
+        with self.replica_db:
+            self.replica_db.execute(
+                "INSERT OR IGNORE INTO replicated_logs (log_index, operation, raw_request, source_ip) VALUES (?, ?, ?, ?)",
+                (log_index, operation, raw_request, get_local_address()),
+            )
+        print(f"✅ Saved replicated operation {log_index}: {operation}")
 
     def apply_logs(self):
         """Applies all pending logs from the replicator."""
         logs = self.replicator.get_logs()
         for log_entry in logs:
+            # print(logs)
+            # print(self.logs)
+            # print(self.last_applied_index)
             if log_entry["log_index"] > self.last_applied_index:
                 self.apply_log(log_entry)
+                print("A111")
                 self.last_applied_index = log_entry["log_index"]
+                print("A112")
                 self.save_last_applied_index()
+                print("A113")
 
     def apply_log(self, log_entry):
         """Applies a single operation to the LDAP server."""
@@ -104,73 +175,53 @@ class LDAPProxyServer:
         ):
             return
 
-        operation = log_entry["operation"]
-        dn = log_entry["dn"]
-        attributes = log_entry["attributes"]
-
-        if operation == "add":
-            success = self.ldap_handler.add_entry(dn, attributes)
-            if not success:
-                print(f"Error when applying ADD operation on {dn}.")
-        elif operation == "delete":
-            result = self.ldap_handler.delete_entry(dn)
-            if not result["success"]:
-                print(f"Error when applying DELETE operation on {dn}.")
-        elif operation == "modify":
-            result = self.ldap_handler.modify_entry(dn, attributes)
-            if not result["success"]:
-                print(f"Error when applying MODIFY operation on {dn}.")
-        else:
-            print(f"Unsupported operation: {operation}")
-
-    def replicate_operation(self, operation, dn, attributes):
-        """Logs and propagates LDAP operations with a log index."""
-        if self.replicator.isReady():
-            log_entry = self.replicator.replicate_operation(
-                operation, dn, attributes, get_local_address()
-            )
-            # print(f"Log entry -> {log_entry}")
-        else:
-            self.local_logs.append(
-                {
-                    "operation": operation,
-                    "dn": dn,
-                    "attributes": attributes,
-                    "source_ip": get_local_address(),
-                    "local_execution": True,
-                }
-            )
-            self.save_local_logs()
-        # self.replicator.replicate_operation(
-        #     operation, dn, attributes, get_local_address()
-        # )
+        self.ldap_handler.forward_request(log_entry["raw_request"])
 
     def replicate_local_logs(self):
         """Replicates pending local operations."""
         for log_entry in self.local_logs:
+            idX = log_entry["id"]
             operation = log_entry["operation"]
-            dn = log_entry["dn"]
-            attributes = log_entry["attributes"]
-            source_ip = log_entry["source_ip"]
-            local_execution = log_entry["local_execution"]
-            self.replicator.replicate_operation(
-                operation, dn, attributes, source_ip, local_execution
+            print("A2")
+            raw_data = log_entry["raw_request"]
+
+            print("A3")
+            print(f"📡 Replicating {operation} request...")
+
+            # Forward the request to the real LDAP server again (simulating replay)
+            response = self.replicator.replicate_operation(
+                raw_data, get_local_address()
             )
-        self.local_logs = []
-        self.save_local_logs()
+            self.save_replicated_log(
+                self.replicator.get_last_applied_index(), operation, raw_data
+            )
+
+            # Clear log after replication
+            self.local_logs.remove(log_entry)
+            with self.local_db:
+                self.local_db.execute("DELETE FROM local_logs WHERE id = ?", (idX,))
+
+    def log_request_for_replication(self, operation, raw_data):
+        """Logs and stores LDAP operations for replication"""
+
+        saved_log = self.save_local_log(operation, raw_data)
+        self.local_logs.append(saved_log)
+
+        print(f"✅ Logged operation for replication: {operation}")
 
     async def periodic_tasks(self):
         """Execute periodic tasks such as applying logs."""
         while True:
             # print(self.replicator.get_logs())
             # Save the logs
+            print("A1")
             if self.replicator.isReady():
                 self.replicate_local_logs()
-            self.replicator.save_logs()
-            # if self.replicator._isLeader():
-            #     print("I am the leader, managing local operations")
-            # else:
-            #     print("I am a follower, applying replicated logs")
+            if self.replicator._isLeader():
+                print("I am the leader, managing local operations")
+            else:
+                print("I am a follower, applying replicated logs")
+            print("A4")
             self.apply_logs()
             await asyncio.sleep(5)
 
@@ -183,249 +234,55 @@ class LDAPProxyServer:
 
         try:
             while True:
-                start_time = time.perf_counter()
-                raw_data = b""  # Buffer for storing received data
+                raw_data = b""
 
+                # Read the complete LDAP message
                 try:
                     while True:
+                        chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
+
+                        if not chunk:  # Connection closed
+                            print(f"Client {client_address} closed the connection.")
+                            return
+
+                        raw_data += chunk  # Append received chunk
+
+                        # Try parsing just the operation name
                         try:
-                            # Read LDAP request with timeout to prevent hangs
-                            chunk = await asyncio.wait_for(
-                                reader.read(4096), timeout=5.0
-                            )
+                            _, operation_name, _ = LDAPParser.parse(raw_data)
+                            break  # Successfully identified operation
+                        except Exception:
+                            continue  # Keep reading until full message is received
 
-                            if not chunk:  # Connection closed
-                                print(f"Client {client_address} closed the connection.")
-                                return
+                except asyncio.TimeoutError:
+                    print(
+                        f"⚠️ Timeout: No complete LDAP message received from {client_address}."
+                    )
+                    return  # Close the connection on timeout
 
-                            raw_data += chunk  # Append received chunk
+                print(f"Received LDAP Operation: {operation_name}")  # Debugging
 
-                            # Attempt to decode the message
-                            try:
-                                ldap_message, operation_name, error = LDAPParser.parse(
-                                    raw_data
-                                )
-                                break  # Successfully decoded, exit loop
-                            except Exception:
-                                continue  # Keep reading until full message is received
+                # Forward the request to the real LDAP server
+                response = self.ldap_handler.forward_request(raw_data)
 
-                        except asyncio.TimeoutError:
-                            print(
-                                f"⚠️ Timeout: No complete LDAP message received from {client_address}."
-                            )
-                            return  # Close the connection on timeout
+                # Save request for replication if it's an ADD, MODIFY, or DELETE operation
+                if operation_name in ["addRequest", "modifyRequest", "delRequest"]:
+                    self.log_request_for_replication(operation_name, raw_data)
 
-                    # Identify the operation
-                    protocol_op = ldap_message["protocolOp"]
-
-                    # Handle different LDAP operations
-                    if operation_name == "unbindRequest":
-                        await self.handle_unbind_request(writer)
-                        break  # Close connection after unbind
-                    elif operation_name == "bindRequest":
-                        await self.handle_bind_request(
-                            ldap_message, protocol_op, writer
-                        )
-                    elif operation_name == "addRequest":
-                        await self.handle_add_request(ldap_message, protocol_op, writer)
-                    elif operation_name == "delRequest":
-                        await self.handle_delete_request(
-                            ldap_message, protocol_op, writer
-                        )
-                    elif operation_name == "modifyRequest":
-                        await self.handle_modify_request(
-                            ldap_message, protocol_op, writer
-                        )
-                    else:
-                        print(f"Forwarding unhandled operation: {operation_name}")
-                        response = self.ldap_handler.forward_request(raw_data)
-
-                        if response:
-                            writer.write(response)
-                            await writer.drain()
-                        else:
-                            print("Error: No response received from LDAP server.")
-
-                except Exception as e:
-                    print(f"⚠️ Error reading data: {str(e)}")
-                    return
+                # Send response back to the client
+                if response:
+                    writer.write(response)
+                    await writer.drain()
+                else:
+                    print("Error: No response received from LDAP server.")
 
         except Exception as e:
-            print(f"Error in handle_client: {str(e)}")
+            print(f"⚠️ Error reading data: {str(e)}")
 
         finally:
             writer.close()
             await writer.wait_closed()
             print(f"Connection closed properly with {client_address}")
-
-    async def handle_unbind_request(self, writer):
-        """Handles an LDAP unbind request by properly closing the connection."""
-        print("Unbind Request received: closing the connection.")
-
-        try:
-            writer.close()  # Close the connection properly
-            await writer.wait_closed()  # Ensure it's fully closed
-            print("Connection closed successfully.")
-        except Exception as e:
-            print(f"Error closing connection: {str(e)}")
-
-    async def handle_bind_request(self, ldap_message, protocol_op, writer):
-        """Handles an LDAP bind request and sends an appropriate response."""
-        bind_request = protocol_op["bindRequest"]
-        dn = str(bind_request["name"])
-        password = str(bind_request["authentication"]["simple"])
-
-        print(
-            f"Bind Request received: dn={dn}, password=******"
-        )  # Hide password in logs
-
-        try:
-            # Validate credentials
-            is_valid = self.ldap_handler.validate_credentials(dn, password)
-            bind_response = BindResponse()
-
-            if is_valid:
-                bind_response["resultCode"] = 0  # Success
-                bind_response["matchedDN"] = dn
-                bind_response["diagnosticMessage"] = "Bind successful"
-                print("✅ Successful bind")
-            else:
-                bind_response["resultCode"] = 49  # Invalid Credentials
-                bind_response["matchedDN"] = ""
-                bind_response["diagnosticMessage"] = "Invalid credentials"
-                print("❌ Invalid credentials")
-
-            # Encode and send the response
-            ldap_response = LDAPMessage()
-            ldap_response["messageID"] = ldap_message["messageID"]
-            ldap_response["protocolOp"]["bindResponse"] = bind_response
-
-            writer.write(encoder.encode(ldap_response))
-            await writer.drain()
-            print("Bind response sent.")
-
-        except Exception as e:
-            print(f"⚠️ Error in handle_bind_request: {str(e)}")
-
-    async def handle_search_request(self, ldap_message, writer):
-        print("Search Request received")
-        search_result_entry = SearchResultEntry()
-        search_result_entry["objectName"] = ""
-        search_result_entry["attributes"] = [
-            {"type": "supportedLDAPVersion", "vals": ["3"]}
-        ]
-
-        search_result_done = SearchResultDone()
-        search_result_done["resultCode"] = 0  # success
-        search_result_done["matchedDN"] = ""
-        search_result_done["diagnosticMessage"] = "Search successful"
-
-        ldap_response_entry = LDAPMessage()
-        ldap_response_entry["messageID"] = ldap_message["messageID"]
-        ldap_response_entry["protocolOp"]["searchResEntry"] = search_result_entry
-        writer.write(encoder.encode(ldap_response_entry))
-        await writer.drain()
-
-        ldap_response_done = LDAPMessage()
-        ldap_response_done["messageID"] = ldap_message["messageID"]
-        ldap_response_done["protocolOp"]["searchResDone"] = search_result_done
-        writer.write(encoder.encode(ldap_response_done))
-        await writer.drain()
-        print("Search response sent")
-
-    async def handle_add_request(self, ldap_message, protocol_op, writer):
-        add_request = protocol_op["addRequest"]
-        dn = str(add_request["entry"])
-        attributes = {
-            str(attr["type"]): [str(value) for value in attr["vals"]]
-            for attr in add_request["attributes"]
-        }
-
-        print(f"Add Request received: dn={dn}, attributes={attributes}")
-        if self.ldap_handler.add_entry(dn, attributes):
-            add_response = AddResponse()
-            add_response["resultCode"] = 0  # success
-            add_response["matchedDN"] = dn
-            add_response["diagnosticMessage"] = "Add successful"
-        else:
-            add_response = AddResponse()
-            add_response["resultCode"] = 80  # other
-            add_response["matchedDN"] = ""
-            add_response["diagnosticMessage"] = "Failed to add entry"
-
-        self.replicate_operation("add", dn, attributes)
-
-        ldap_response = LDAPMessage()
-        ldap_response["messageID"] = ldap_message["messageID"]
-        ldap_response["protocolOp"]["addResponse"] = add_response
-        writer.write(encoder.encode(ldap_response))
-        await writer.drain()
-        print("Add response sent")
-
-    async def handle_delete_request(self, ldap_message, protocol_op, writer):
-        dn = str(protocol_op["delRequest"])
-        print(f"Delete Request received: dn={dn}")
-
-        result = self.ldap_handler.delete_entry(dn)
-        if result["success"]:
-            del_response = DelResponse()
-            del_response["resultCode"] = 0  # success
-            del_response["matchedDN"] = dn
-            del_response["diagnosticMessage"] = result["description"]
-        else:
-            del_response = DelResponse()
-            del_response["resultCode"] = 80  # other
-            del_response["matchedDN"] = ""
-            del_response["diagnosticMessage"] = result["description"]
-
-        self.replicate_operation("delete", dn, {})
-
-        ldap_response = LDAPMessage()
-        ldap_response["messageID"] = ldap_message["messageID"]
-        ldap_response["protocolOp"]["delResponse"] = del_response
-        writer.write(encoder.encode(ldap_response))
-        await writer.drain()
-        print(f"Delete response sent: {result}")
-
-    async def handle_modify_request(self, ldap_message, protocol_op, writer):
-        dn = str(protocol_op["modifyRequest"]["object"])
-        print(f"Modify Request received: dn={dn}")
-
-        changes = []
-        for change in protocol_op["modifyRequest"]["changes"]:
-            operation = LDAP_OPERATIONS[change["operation"]]
-            attribute = str(change["modification"]["type"])
-            values = [str(value) for value in change["modification"]["vals"]]
-            changes.append(
-                {"operation": operation, "attribute": attribute, "values": values}
-            )
-
-        ldap_changes = {}
-        for change in changes:
-            ldap_changes.setdefault(change["attribute"], []).append(
-                (change["operation"], change["values"])
-            )
-
-        result = self.ldap_handler.modify_entry(dn, ldap_changes)
-        if result["success"]:
-            modify_response = ModifyResponse()
-            modify_response["resultCode"] = 0
-            modify_response["matchedDN"] = dn
-            modify_response["diagnosticMessage"] = result["description"]
-        else:
-            modify_response = ModifyResponse()
-            modify_response["resultCode"] = 80  # Generic error code
-            modify_response["matchedDN"] = ""
-            modify_response["diagnosticMessage"] = result["description"]
-
-        self.replicate_operation("modify", dn, ldap_changes)
-
-        ldap_response = LDAPMessage()
-        ldap_response["messageID"] = ldap_message["messageID"]
-        ldap_response["protocolOp"]["modifyResponse"] = modify_response
-        writer.write(encoder.encode(ldap_response))
-        await writer.drain()
-        print(f"Modify response sent: {result}")
 
     async def run(self, host="127.0.0.1", port=1389):
         server = await asyncio.start_server(self.handle_client, host, port)
