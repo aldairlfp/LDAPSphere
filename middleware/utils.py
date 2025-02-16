@@ -1,4 +1,5 @@
 import socket
+import logging
 
 
 def get_local_address():
@@ -8,7 +9,7 @@ def get_local_address():
         local_ip = socket.gethostbyname(hostname)
         return local_ip
     except Exception as e:
-        print(f"Error obteniendo la dirección local: {e}")
+        logging.error(f"Error obteniendo la dirección local: {e}")
         return "127.0.0.1"  # Dirección predeterminada si falla
 
 
@@ -20,9 +21,9 @@ def discover_addresses(dns_domain, fallback_ips, timeout=5):
         # Attempt to resolve DNS
         srv_records = socket.getaddrinfo(dns_domain, None, family=socket.AF_INET)
         addresses = [rec[4][0] for rec in srv_records]
-        print(f"Discovered via DNS: {addresses}")
+        logging.info(f"Discovered via DNS: {addresses}")
         return addresses
     except Exception as e:
-        print(f"DNS resolution failed for {dns_domain}: {e}")
-        print(f"Falling back to predefined IPs: {fallback_ips}")
+        logging.error(f"DNS resolution failed for {dns_domain}: {e}")
+        logging.info(f"Falling back to predefined IPs: {fallback_ips}")
         return fallback_ips

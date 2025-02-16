@@ -1,6 +1,7 @@
 import asyncio
 import os
 import pickle
+import logging
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 
 from middleware.ldap_parser import LDAPParser
@@ -30,12 +31,6 @@ class LDAPProxyServer:
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
         self.data_path = os.path.join(base_dir, "..", f"data_{get_local_address()}.pkl")
-        # self.local_logs = self.load_local_logs()
-
-        self.last_applied_index_file = os.path.join(
-            base_dir, "..", f"last_applied_index_{get_local_address()}.txt"
-        )
-        # self.last_applied_index = self.load_last_applied_index()
 
         local_logs, last_applied_index = self.load_data()
 
@@ -51,18 +46,7 @@ class LDAPProxyServer:
 
         self.replicator = LDAPReplicator(f"{raft_self}:{port}", self.raft_partners)
 
-    def load_last_applied_index(self):
-        """Loads the last applied operation index from a file."""
-        try:
-            with open(self.last_applied_index_file, "r") as f:
-                return int(f.read().strip())
-        except FileNotFoundError:
-            return 0
-
-    def save_last_applied_index(self):
-        """Saves the index of the last operation applied."""
-        with open(self.last_applied_index_file, "w") as f:
-            f.write(str(self.last_applied_index))
+        logging.info("LDAPProxyServer initialized")
 
     def load_data(self):
         """Retrieve all unreplicated operations"""
@@ -76,6 +60,7 @@ class LDAPProxyServer:
             }
             with open(self.data_path, "wb") as f:
                 pickle.dump(data, f)
+        logging.info(f"Loaded data from {self.data_path}")
         return data["local_logs"], data["last_applied_index"]
 
     def save_data(self):
@@ -87,11 +72,9 @@ class LDAPProxyServer:
                     "last_applied_index": self.last_applied_index,
                 }
                 pickle.dump(data, f)
-            with open(self.data_path, "wb") as f:
-                pickle.dump(data, f)
         except Exception as e:
-            with open(self.data_path, "wb") as f:
-                pickle.dump(data, f)
+            logging.error(f"Error saving data: {e}")
+        logging.info(f"Saved data to {self.data_path}")
         return data["local_logs"], data["last_applied_index"]
 
     def apply_logs(self):
@@ -101,7 +84,6 @@ class LDAPProxyServer:
             self.apply_log(log_entry)
             self.last_applied_index = log_entry["log_index"]
 
-            # self.save_last_applied_index()
             self.save_data()
 
     def apply_log(self, log_entry):
@@ -116,12 +98,11 @@ class LDAPProxyServer:
 
     def replicate_local_logs(self):
         """Replicates pending local operations."""
-        # print(self.local_logs)
         for log_entry in self.local_logs:
             operation = log_entry["operation"]
             raw_data = log_entry["raw_request"]
 
-            print(f"📡 Replicating {operation} request...")
+            logging.info(f"Replicating {operation} request...")
 
             # Forward the request to the real LDAP server again (simulating replay)
             self.replicator.replicate_operation(
@@ -142,7 +123,7 @@ class LDAPProxyServer:
         )
         self.save_data()
 
-        print(f"✅ Logged operation for replication: {operation}")
+        logging.info(f"Logged operation for replication: {operation}")
 
     async def periodic_tasks(self):
         """Execute periodic tasks such as applying logs."""
@@ -154,14 +135,14 @@ class LDAPProxyServer:
             if self.replicator.isReady():
                 self.replicate_local_logs()
 
-            print("Logs:")
+            logging.info("Logs:")
             for log in self.replicator.get_logs():
-                print({k: v for k, v in log.items() if k != "raw_request"})
-            print(f"Lenght of logs: {len(self.replicator.get_logs())}")
+                logging.info({k: v for k, v in log.items() if k != "raw_request"})
+            logging.info(f"Length of logs: {len(self.replicator.get_logs())}")
 
-            print("Local Logs:")
+            logging.info("Local Logs:")
             for log in self.local_logs:
-                print({k: v for k, v in log.items() if k != "raw_request"})
+                logging.info({k: v for k, v in log.items() if k != "raw_request"})
 
             # if self.replicator._isLeader():
             #     print("I am the leader, managing local operations")
@@ -175,7 +156,7 @@ class LDAPProxyServer:
         Handles incoming LDAP client requests, ensuring complete message reads and preventing hangs.
         """
         client_address = writer.get_extra_info("peername")
-        print(f"Connection from: {client_address}")
+        logging.info(f"Connection from: {client_address}")
 
         try:
             while True:
@@ -187,7 +168,9 @@ class LDAPProxyServer:
                         chunk = await asyncio.wait_for(reader.read(4096), timeout=5.0)
 
                         if not chunk:  # Connection closed
-                            print(f"Client {client_address} closed the connection.")
+                            logging.info(
+                                f"Client {client_address} closed the connection."
+                            )
                             return
 
                         raw_data += chunk  # Append received chunk
@@ -200,12 +183,12 @@ class LDAPProxyServer:
                             continue  # Keep reading until full message is received
 
                 except asyncio.TimeoutError:
-                    print(
-                        f"⚠️ Timeout: No complete LDAP message received from {client_address}."
+                    logging.warning(
+                        f"Timeout: No complete LDAP message received from {client_address}."
                     )
                     return  # Close the connection on timeout
 
-                print(f"Received LDAP Operation: {operation_name}")  # Debugging
+                logging.info(f"Received LDAP Operation: {operation_name}")  # Debugging
 
                 # Forward the request to the real LDAP server
                 response = self.ldap_handler.forward_request(raw_data)
@@ -219,19 +202,19 @@ class LDAPProxyServer:
                     writer.write(response)
                     await writer.drain()
                 else:
-                    print("Error: No response received from LDAP server.")
+                    logging.error("Error: No response received from LDAP server.")
 
         except Exception as e:
-            print(f"⚠️ Error reading data: {str(e)}")
+            logging.error(f"Error reading data: {str(e)}")
 
         finally:
             writer.close()
             await writer.wait_closed()
-            print(f"Connection closed properly with {client_address}")
+            logging.info(f"Connection closed properly with {client_address}")
 
     async def run(self, host="127.0.0.1", port=1389):
         server = await asyncio.start_server(self.handle_client, host, port)
-        print(f"LDAP Middleware running on {host}:{port}")
+        logging.info(f"LDAP Middleware running on {host}:{port}")
         asyncio.create_task(self.periodic_tasks())
         async with server:
             await server.serve_forever()

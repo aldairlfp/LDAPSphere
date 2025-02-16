@@ -1,6 +1,7 @@
 import os
 import select
 import sqlite3
+import logging
 
 from middleware.utils import get_local_address
 
@@ -43,7 +44,7 @@ class LDAPRequestHandler:
             return response_data
 
         except Exception as e:
-            print(f"Error forwarding request: {str(e)}")
+            logging.error(f"Error forwarding request: {str(e)}")
             self.save_failed_request(request)
             return None
 

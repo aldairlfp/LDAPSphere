@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from pysyncobj import SyncObj, replicated, SyncObjConf
 
 
@@ -41,7 +42,7 @@ class LDAPReplicator(SyncObj):
         }
         self.__logs.append(log_entry)
 
-        print(f"Replicated operation: {self.__log_index}")
+        logging.info(f"Replicated operation: {self.__log_index}")
         return log_entry
 
     def get_logs(self):

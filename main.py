@@ -1,5 +1,6 @@
 import asyncio
 import os
+import logging
 from dotenv import load_dotenv
 
 from middleware.proxy_server import LDAPProxyServer
@@ -32,4 +33,5 @@ if __name__ == "__main__":
     )
 
     # Ejecutar el servidor
+    logging.info("Starting LDAP Proxy Server...")
     asyncio.run(proxy_server.run("0.0.0.0", os.getenv("PROXY_PORT", 1389)))
