@@ -4,7 +4,7 @@ from pysyncobj import SyncObj, replicated, SyncObjConf
 
 
 class LDAPReplicator(SyncObj):
-    def __init__(self, self_address, partner_addresses, logs):
+    def __init__(self, self_address, partner_addresses):
         path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..",
