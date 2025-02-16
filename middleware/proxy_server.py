@@ -1,7 +1,6 @@
 import asyncio
 import os
-import sqlite3
-import time
+import pickle
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 
 from middleware.ldap_parser import LDAPParser
@@ -25,6 +24,24 @@ class LDAPProxyServer:
         fallback_ips,
         port=5000,
     ):
+        # Existing logic remains unchanged
+        self.ldap_handler = LDAPRequestHandler(ldap_server, ldap_user, ldap_password)
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        self.data_path = os.path.join(base_dir, "..", f"data_{get_local_address()}.pkl")
+        # self.local_logs = self.load_local_logs()
+
+        self.last_applied_index_file = os.path.join(
+            base_dir, "..", f"last_applied_index_{get_local_address()}.txt"
+        )
+        # self.last_applied_index = self.load_last_applied_index()
+
+        local_logs, last_applied_index = self.load_data()
+
+        self.local_logs = local_logs
+        self.last_applied_index = last_applied_index
+
         # Resolve partners dynamically
         self.raft_partners = discover_addresses(dns_domain, fallback_ips)
         self.raft_partners = [addr for addr in self.raft_partners if addr != raft_self]
@@ -32,38 +49,7 @@ class LDAPProxyServer:
             f"{addr}:{port}" for addr in self.raft_partners if addr != f"{raft_self}"
         ]
 
-        # Existing logic remains unchanged
-        self.ldap_handler = LDAPRequestHandler(ldap_server, ldap_user, ldap_password)
-
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-        self.setup_database(base_dir)
-        self.local_logs = self.load_local_logs()
         self.replicator = LDAPReplicator(f"{raft_self}:{port}", self.raft_partners)
-
-        self.last_applied_index_file = os.path.join(
-            base_dir, "..", f"last_applied_index_{get_local_address()}.txt"
-        )
-        self.last_applied_index = self.load_last_applied_index()
-
-    def setup_database(self, base_dir):
-        """Initialize SQLite databases for logs and local logs"""
-        local_logs_file = os.path.join(
-            base_dir, "..", f"local_logs_{get_local_address()}.db"
-        )
-        self.local_db = sqlite3.connect(local_logs_file, check_same_thread=False)
-
-        with self.local_db:
-            self.local_db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS local_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    operation TEXT,
-                    raw_request BLOB,
-                    source_ip TEXT
-                )
-            """
-            )
 
     def load_last_applied_index(self):
         """Loads the last applied operation index from a file."""
@@ -78,26 +64,35 @@ class LDAPProxyServer:
         with open(self.last_applied_index_file, "w") as f:
             f.write(str(self.last_applied_index))
 
-    def load_local_logs(self):
+    def load_data(self):
         """Retrieve all unreplicated operations"""
-        with self.local_db:
-            logs = self.local_db.execute(
-                "SELECT id, operation, raw_request FROM local_logs"
-            ).fetchall()
-        return [
-            {"id": idX, "operation": op, "raw_request": req} for idX, op, req in logs
-        ]
+        try:
+            with open(self.data_path, "rb") as f:
+                data = pickle.load(f)
+        except FileNotFoundError:
+            data = {
+                "local_logs": [],
+                "last_applied_index": 0,
+            }
+            with open(self.data_path, "wb") as f:
+                pickle.dump(data, f)
+        return data["local_logs"], data["last_applied_index"]
 
-    def save_local_log(self, operation, raw_request):
+    def save_data(self):
         """Save an operation to the local log (before replication) and return the row added."""
-        with self.local_db:
-            cursor = self.local_db.execute(
-                "INSERT INTO local_logs (operation, raw_request, source_ip) VALUES (?, ?, ?)",
-                (operation, raw_request, get_local_address()),
-            )
-            row_id = cursor.lastrowid
-        print(f"✅ Saved local operation: {operation}")
-        return {"id": row_id, "operation": operation, "raw_request": raw_request}
+        try:
+            with open(self.data_path, "wb") as f:
+                data = {
+                    "local_logs": self.local_logs,
+                    "last_applied_index": self.last_applied_index,
+                }
+                pickle.dump(data, f)
+            with open(self.data_path, "wb") as f:
+                pickle.dump(data, f)
+        except Exception as e:
+            with open(self.data_path, "wb") as f:
+                pickle.dump(data, f)
+        return data["local_logs"], data["last_applied_index"]
 
     def apply_logs(self):
         """Applies all pending logs from the replicator and prints timing statistics."""
@@ -106,7 +101,8 @@ class LDAPProxyServer:
             self.apply_log(log_entry)
             self.last_applied_index = log_entry["log_index"]
 
-            self.save_last_applied_index()
+            # self.save_last_applied_index()
+            self.save_data()
 
     def apply_log(self, log_entry):
         """Applies a single operation to the LDAP server."""
@@ -120,8 +116,8 @@ class LDAPProxyServer:
 
     def replicate_local_logs(self):
         """Replicates pending local operations."""
+        # print(self.local_logs)
         for log_entry in self.local_logs:
-            idX = log_entry["id"]
             operation = log_entry["operation"]
             raw_data = log_entry["raw_request"]
 
@@ -134,14 +130,17 @@ class LDAPProxyServer:
 
             # Clear log after replication
             self.local_logs.remove(log_entry)
-            with self.local_db:
-                self.local_db.execute("DELETE FROM local_logs WHERE id = ?", (idX,))
 
     def log_request_for_replication(self, operation, raw_data):
         """Logs and stores LDAP operations for replication"""
 
-        saved_log = self.save_local_log(operation, raw_data)
-        self.local_logs.append(saved_log)
+        self.local_logs.append(
+            {
+                "operation": operation,
+                "raw_request": raw_data,
+            }
+        )
+        self.save_data()
 
         print(f"✅ Logged operation for replication: {operation}")
 
