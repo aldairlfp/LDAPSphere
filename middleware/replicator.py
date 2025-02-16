@@ -1,21 +1,41 @@
 import json
 import os
-from pysyncobj import SyncObj, replicated
+from pysyncobj import SyncObj, replicated, SyncObjConf
 
 
 class LDAPReplicator(SyncObj):
     def __init__(self, self_address, partner_addresses, logs):
-        super().__init__(self_address, partner_addresses)
-        self.__logs = logs
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..",
+            f"raft_data_dump_{self_address}.bin",
+        )
+        path1 = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..",
+            f"raft_data_{self_address}.bin",
+        )
+        conf = SyncObjConf(
+            dynamicMembershipChange=True, fullDumpFile=path, journalFile=path1
+        )
+        super().__init__(
+            self_address,
+            partner_addresses,
+            conf,
+        )
+        self.__logs = []
         self.__log_index = 0
 
     @replicated
-    def replicate_operation(self, raw_request, source_ip, local_execution=False):
+    def replicate_operation(
+        self, raw_request, operation, source_ip, local_execution=False
+    ):
         """Register a new operation in the logs"""
         self.__log_index += 1
         log_entry = {
             "log_index": self.__log_index,
             "raw_request": raw_request,
+            "operation": operation,
             "source_ip": source_ip,
             "local_execution": local_execution,
         }

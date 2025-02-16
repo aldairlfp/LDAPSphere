@@ -1,19 +1,9 @@
 import asyncio
 import os
 import sqlite3
-from pyasn1.codec.ber import decoder, encoder
-from ldap3.protocol.rfc4511 import (
-    LDAPMessage,
-    BindResponse,
-    AddResponse,
-    DelResponse,
-    ModifyResponse,
-    SearchResultEntry,
-    SearchResultDone,
-)
+import time
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 
-from metrics.measure_ldap_direct import measure_direct_ldap_query
 from middleware.ldap_parser import LDAPParser
 from middleware.replicator import LDAPReplicator
 from middleware.request_handler import LDAPRequestHandler
@@ -34,7 +24,6 @@ class LDAPProxyServer:
         dns_domain,
         fallback_ips,
         port=5000,
-        logs_file=f"logs_{get_local_address()}.json",
     ):
         # Resolve partners dynamically
         self.raft_partners = discover_addresses(dns_domain, fallback_ips)
@@ -97,6 +86,13 @@ class LDAPProxyServer:
                 )
             """
             )
+        # with sqlite3.connect(
+        #     os.path.join(base_dir, "..", f"failed_requests_{get_local_address()}.db")
+        # ) as conn:
+        #     cursor = conn.cursor()
+        #     cursor.execute(
+        #         "CREATE TABLE IF NOT EXISTS failed_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, request BLOB)"
+        #     )
 
     def load_last_applied_index(self):
         """Loads the last applied operation index from a file."""
@@ -153,13 +149,43 @@ class LDAPProxyServer:
         print(f"✅ Saved replicated operation {log_index}: {operation}")
 
     def apply_logs(self):
-        """Applies all pending logs from the replicator."""
+        """Applies all pending logs from the replicator and prints timing statistics."""
+        min_time = float("inf")
+        max_time = 0
+        total_time = 0
+        times = []
         logs = self.replicator.get_logs()
         for log_entry in logs:
             if log_entry["log_index"] > self.last_applied_index:
+                start_time = time.time()
+
                 self.apply_log(log_entry)
                 self.last_applied_index = log_entry["log_index"]
+
                 self.save_last_applied_index()
+
+                self.save_replicated_log(
+                    log_entry["log_index"],
+                    log_entry["operation"],
+                    log_entry["raw_request"],
+                )
+
+                end_time = time.time()
+                operation_time = end_time - start_time
+                times.append(operation_time)
+                total_time += operation_time
+                if operation_time < min_time:
+                    min_time = operation_time
+                if operation_time > max_time:
+                    max_time = operation_time
+
+        if times:
+            avg_time = total_time / len(times)
+            print(
+                f"Operation times - Min: {min_time:.4f}s, Max: {max_time:.4f}s, Avg: {avg_time:.4f}s, Total: {total_time:.4f}s"
+            )
+        else:
+            print("No operations to apply.")
 
     def apply_log(self, log_entry):
         """Applies a single operation to the LDAP server."""
@@ -176,18 +202,13 @@ class LDAPProxyServer:
         for log_entry in self.local_logs:
             idX = log_entry["id"]
             operation = log_entry["operation"]
-            print("A2")
             raw_data = log_entry["raw_request"]
 
-            print("A3")
             print(f"📡 Replicating {operation} request...")
 
             # Forward the request to the real LDAP server again (simulating replay)
             response = self.replicator.replicate_operation(
-                raw_data, get_local_address()
-            )
-            self.save_replicated_log(
-                self.replicator.get_last_applied_index(), operation, raw_data
+                raw_data, operation, get_local_address()
             )
 
             # Clear log after replication
@@ -208,21 +229,28 @@ class LDAPProxyServer:
         while True:
             # print(self.replicator.get_logs())
             # Save the logs
+            # self.retry_failed_requests()
+            # self.replicator.addNodeToCluster("172.19.0.9:5000")
+            self.replicator.forceLogCompaction()
+            if not self.ldap_handler.check_ldap_availability():
+                logging.error("LDAP server is not available. Exiting.")
+                os._exit(1)
             if self.replicator.isReady():
                 self.replicate_local_logs()
 
             print("Logs:")
-            for log in self.logs:
+            for log in self.replicator.get_logs():
                 print({k: v for k, v in log.items() if k != "raw_request"})
+            print(f"Lenght of logs: {len(self.replicator.get_logs())}")
 
             print("Local Logs:")
             for log in self.local_logs:
                 print({k: v for k, v in log.items() if k != "raw_request"})
 
-            # if self.replicator._isLeader():
-            #     print("I am the leader, managing local operations")
-            # else:
-            #     print("I am a follower, applying replicated logs")
+            if self.replicator._isLeader():
+                print("I am the leader, managing local operations")
+            else:
+                print("I am a follower, applying replicated logs")
             self.apply_logs()
             await asyncio.sleep(5)
 
