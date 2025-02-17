@@ -33,7 +33,7 @@ class LDAPProxyServer:
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
-        self.data_path = os.path.join(base_dir, "..", f"data_{get_local_address()}.pkl")
+        self.data_path = os.path.join(base_dir, "..", f"data.pkl")
 
         local_logs, last_applied_index = self.load_data()
 

@@ -9,12 +9,12 @@ class LDAPReplicator(SyncObj):
         path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..",
-            f"raft_data_dump_{self_address}.bin",
+            f"logs_data_dump.bin",
         )
         path1 = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..",
-            f"raft_data_{self_address}.bin",
+            f"logs_data.bin",
         )
         conf = SyncObjConf(
             dynamicMembershipChange=True, fullDumpFile=path, journalFile=path1
