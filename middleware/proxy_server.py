@@ -2,6 +2,7 @@ import asyncio
 import os
 import pickle
 import logging
+import socket
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 
 from middleware.ldap_parser import LDAPParser
@@ -25,6 +26,7 @@ class LDAPProxyServer:
         fallback_ips,
         port=5000,
     ):
+        self.port = port
         # Existing logic remains unchanged
         self.ldap_handler = LDAPRequestHandler(ldap_server, ldap_user, ldap_password)
 
@@ -43,6 +45,8 @@ class LDAPProxyServer:
         self.raft_partners = [
             f"{addr}:{port}" for addr in self.raft_partners if addr != f"{raft_self}"
         ]
+
+        self.possible_joins = []
 
         self.replicator = LDAPReplicator(f"{raft_self}:{port}", self.raft_partners)
 
@@ -125,29 +129,85 @@ class LDAPProxyServer:
 
         logging.info(f"Logged operation for replication: {operation}")
 
+    async def broadcast_presence(self):
+        """Periodically announce this node's presence via UDP."""
+        while True:
+            try:
+                message = f"NODE_ANNOUNCE {get_local_address()}:{self.port}"
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                sock.sendto(message.encode(), ("255.255.255.255", 5005))
+                sock.close()  # Ensure the socket is closed
+                logging.info("Broadcasted node presence")
+            except Exception as e:
+                logging.error(f"Error broadcasting presence: {e}")
+
+            await asyncio.sleep(10)  # Prevents excessive looping
+
+    async def listen_for_nodes(self):
+        """Listen for incoming node announcements and add them dynamically."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(5)  # Prevents the blocking issue
+        sock.bind(("0.0.0.0", 5005))
+
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(asyncio.to_thread(sock.recvfrom, 1024), timeout=3)
+                    message = data[0].decode()
+
+                    if message.startswith("NODE_ANNOUNCE"):
+                        _, node_address = message.split(" ")
+                        if (
+                            node_address not in self.raft_partners
+                            and node_address not in self.possible_joins
+                            and node_address != f"{get_local_address()}:5000"
+                        ):
+                            self.possible_joins.append(node_address)
+                            logging.info(f"🔍 Detected new node: {node_address}")
+
+                except asyncio.TimeoutError:
+                    await asyncio.sleep(10)  # Allows the loop to stay responsive
+                except Exception as e:
+                    logging.error(f"Error receiving node announcement: {e}")
+                    await asyncio.sleep(10)  # Prevents excessive retries in case of error
+        finally:
+            sock.close()  # Ensure the socket is closed
+            logging.info("Socket closed properly")
+
     async def periodic_tasks(self):
         """Execute periodic tasks such as applying logs."""
         while True:
             self.replicator.forceLogCompaction()
+
+            for node in self.possible_joins:
+                self.replicator.addNodeToCluster(node)
+                self.raft_partners.append(node)
+
+            self.possible_joins.clear()
+
             if not self.ldap_handler.check_ldap_availability():
                 logging.error("LDAP server is not available. Exiting.")
                 os._exit(1)
             if self.replicator.isReady():
                 self.replicate_local_logs()
 
-            logging.info("Logs:")
+            print("Logs:")
             for log in self.replicator.get_logs():
-                logging.info({k: v for k, v in log.items() if k != "raw_request"})
-            logging.info(f"Length of logs: {len(self.replicator.get_logs())}")
+                print({k: v for k, v in log.items() if k != "raw_request"})
+            print(f"Length of logs: {len(self.replicator.get_logs())}")
 
-            logging.info("Local Logs:")
+            print("Local Logs:")
             for log in self.local_logs:
-                logging.info({k: v for k, v in log.items() if k != "raw_request"})
+                print({k: v for k, v in log.items() if k != "raw_request"})
 
-            # if self.replicator._isLeader():
-            #     print("I am the leader, managing local operations")
-            # else:
-            #     print("I am a follower, applying replicated logs")
+            if self.replicator._isLeader():
+                print("I am the leader, managing local operations")
+            else:
+                print("I am a follower, applying replicated logs")
+
+            print(f"Raft Partners: {self.raft_partners}")
+
             self.apply_logs()
             await asyncio.sleep(5)
 
@@ -216,5 +276,10 @@ class LDAPProxyServer:
         server = await asyncio.start_server(self.handle_client, host, port)
         logging.info(f"LDAP Middleware running on {host}:{port}")
         asyncio.create_task(self.periodic_tasks())
+
+        # Start gossip-based discovery
+        asyncio.create_task(self.broadcast_presence())
+        asyncio.create_task(self.listen_for_nodes())
+
         async with server:
             await server.serve_forever()
