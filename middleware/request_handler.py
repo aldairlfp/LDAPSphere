@@ -12,14 +12,14 @@ class LDAPRequestHandler:
         self.admin_dn = admin_dn
         self.admin_password = admin_password
 
-    def forward_request(self, request):
+    def forward_request(self, request, user_dn, password):
         from ldap3 import Server, Connection, ALL
 
         try:
             # Connect to the real LDAP server
             server = Server(self.ldap_url, get_info=ALL)
             conn = Connection(
-                server, user=self.admin_dn, password=self.admin_password, auto_bind=True
+                server, user=user_dn, password=password, auto_bind=True
             )
 
             conn.socket.send(request)  # Send the request to the real LDAP server
@@ -60,17 +60,3 @@ class LDAPRequestHandler:
             return True  # LDAP server is available
         except Exception:
             return False  # LDAP server is offline
-
-    def save_failed_request(self, request):
-        """Save the failed LDAP request to the database for future retries."""
-        base = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base, "..", f"failed_requests_{get_local_address()}.db")
-        with sqlite3.connect(path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "CREATE TABLE IF NOT EXISTS failed_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, request BLOB)"
-            )
-            cursor.execute(
-                "INSERT INTO failed_requests (request) VALUES (?)", (request,)
-            )
-            conn.commit()

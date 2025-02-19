@@ -29,7 +29,13 @@ class LDAPReplicator(SyncObj):
 
     @replicated
     def replicate_operation(
-        self, raw_request, operation, source_ip, local_execution=False
+        self,
+        raw_request,
+        operation,
+        user_dn,
+        password,
+        source_ip,
+        local_execution=False,
     ):
         """Register a new operation in the logs"""
         self.__log_index += 1
@@ -37,6 +43,8 @@ class LDAPReplicator(SyncObj):
             "log_index": self.__log_index,
             "raw_request": raw_request,
             "operation": operation,
+            "user_dn": user_dn,
+            "password": password,
             "source_ip": source_ip,
             "local_execution": local_execution,
         }
