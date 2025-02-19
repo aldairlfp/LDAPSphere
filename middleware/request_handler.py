@@ -1,9 +1,7 @@
-import os
-import select
-import sqlite3
-import logging
+from ldap3 import Server, Connection, ALL
 
-from middleware.utils import get_local_address
+import select
+import logging
 
 
 class LDAPRequestHandler:
@@ -13,14 +11,10 @@ class LDAPRequestHandler:
         self.admin_password = admin_password
 
     def forward_request(self, request, user_dn, password):
-        from ldap3 import Server, Connection, ALL
-
         try:
             # Connect to the real LDAP server
             server = Server(self.ldap_url, get_info=ALL)
-            conn = Connection(
-                server, user=user_dn, password=password, auto_bind=True
-            )
+            conn = Connection(server, user=user_dn, password=password, auto_bind=True)
 
             conn.socket.send(request)  # Send the request to the real LDAP server
 
@@ -50,8 +44,6 @@ class LDAPRequestHandler:
 
     def check_ldap_availability(self):
         """Check if the LDAP server is reachable."""
-        from ldap3 import Server, Connection, ALL
-
         try:
             server = Server(self.ldap_url, get_info=ALL)
             conn = Connection(

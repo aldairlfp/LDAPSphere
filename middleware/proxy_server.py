@@ -22,8 +22,7 @@ class LDAPProxyServer:
         ldap_user,
         ldap_password,
         raft_self,
-        fallback_ips=["172.19.0.6", "172.19.0.7", "172.19.0.8"],
-        cluster_ip=None,
+        fallback_ips=[],
         port=5000,
     ):
         self.port = port
@@ -49,9 +48,6 @@ class LDAPProxyServer:
             ]
 
         self.replicator = LDAPReplicator(f"{raft_self}:{port}", raft_partners)
-
-        if cluster_ip:
-            self.possible_joins.append(f"{cluster_ip}:{port}")
 
         self.authenticated_users = {}
 

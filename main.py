@@ -16,13 +16,10 @@ if __name__ == "__main__":
     LDAP_SERVER = os.getenv("LDAP_URL", "ldap://localhost:389")
     LDAP_USER = os.getenv("LDAP_ADMIN_DN", "cn=admin,dc=example,dc=com")
     LDAP_PASSWORD = os.getenv("LDAP_ADMIN_PASSWORD", "1234")
-    DNS_DOMAIN = os.getenv("DNS_DOMAIN", "example.com")
 
     # Dirección del nodo actual y nodos en la red
     RAFT_SELF = f"{get_local_address()}"
     FALLBACK_IPS = os.getenv("FALLBACK_IPS")
-    # Inicializar el servidor proxy
-    cluster_ip = os.getenv("CLUSTER_IP")
 
     if FALLBACK_IPS:
         cluster = FALLBACK_IPS.split(",")
@@ -35,7 +32,6 @@ if __name__ == "__main__":
         LDAP_PASSWORD,
         RAFT_SELF,
         cluster,
-        cluster_ip,
         os.getenv("RAFT_PORT", 5000),
     )
 
